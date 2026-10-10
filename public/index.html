@@ -227,6 +227,36 @@
 
   .poi-grid .empty { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 
+  /* Models (Easy Model Entities packages) */
+  .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .model-grid .empty { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+  .model { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .model.uploaded { border-color: #245a40; }
+  .model.pending { border-color: #6b4f1a; }
+  .model-textures { display: flex; gap: 8px; flex-wrap: wrap; }
+  .model-textures img { width: 72px; height: 72px; image-rendering: pixelated; background: repeating-conic-gradient(#1e222b 0 25%, #171a21 0 50%) 0 0 / 12px 12px; border: 1px solid var(--border); border-radius: 6px; object-fit: contain; }
+  .model-textures figure { margin: 0; display: grid; gap: 3px; justify-items: center; font-size: 11px; color: var(--muted); max-width: 72px; }
+  .model-textures figcaption { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 72px; }
+  .model-title { font-weight: 600; font-size: 16px; overflow-wrap: anywhere; }
+  .model.new .model-title::after { content: "NEW"; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 8px; vertical-align: 2px; }
+  .status { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; border: 1px solid currentColor; white-space: nowrap; }
+  .status.proposed { color: #8fb6ff; }
+  .status.uploaded { color: var(--ok); }
+  .status.pending { color: #f0b54a; }
+  .model-meta { color: var(--muted); font-size: 13px; }
+  .model-note { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+  .model-warn { color: #f0b54a; font-size: 12px; }
+  .skin-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .skin-row .skin-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .skin-row .cmd { flex: 2; }
+  .model-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+  .model-foot .actions { flex-wrap: wrap; }
+  .model-foot .actions button, .model-foot .actions .btn { padding: 3px 9px; font-size: 12px; }
+  .model-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .model-tools .btn.big { font-weight: 600; }
+  .model-help { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .model-help code { font: 12px ui-monospace, Consolas, monospace; color: #b8f5c8; }
+
   @media (max-width: 860px) {
     .layout { grid-template-columns: 1fr; }
     .chat { position: static; height: 70vh; order: 2; }
@@ -311,7 +341,38 @@
     <button class="tab" data-tab="links">Mod suggestions <small id="links-count"></small></button>
     <button class="tab" data-tab="installed">Installed on server <small id="installed-count"></small></button>
     <button class="tab" data-tab="pois">Places <small id="pois-count"></small></button>
+    <button class="tab" data-tab="models">Models <small id="models-count"></small></button>
   </nav>
+
+  <section id="tab-models" hidden>
+    <p class="model-help">Models are Easy Model Entities packs: a Blockbench model with its textures and animations, built as one <code>.jar</code>
+      that goes into the <code>mods</code> folder on the server and on every player. Upload the jar (or the zip the Blockbench exporter makes),
+      add skins to it here, and the server admin downloads everything below.</p>
+    <form class="mod-form" id="model-form" autocomplete="off">
+      <h2>Propose a model</h2>
+      <label>Name
+        <input class="text-in" id="model-name" maxlength="80" placeholder="Filled in from the pack if left empty">
+      </label>
+      <label>Note (optional)
+        <input class="text-in" id="model-note" maxlength="300" placeholder="What it is, who made it, how to use it">
+      </label>
+      <div class="full rel-pick">
+        <button type="button" id="model-pick">Choose .jar or .zip</button>
+        <span id="model-picked">Nothing chosen yet. You can also drop the file onto this window.</span>
+        <input type="file" id="model-input" accept=".jar,.zip" hidden>
+      </div>
+      <div class="mod-form-bottom">
+        <span class="mod-status" id="model-status"></span>
+        <button id="model-submit">Upload model</button>
+      </div>
+    </form>
+    <div class="queue" id="model-queue"></div>
+    <div class="list-head">
+      <h2>Models <small id="model-shown"></small></h2>
+      <div class="model-tools" id="model-tools"></div>
+    </div>
+    <div class="model-grid" id="model-grid"></div>
+  </section>
 
   <section id="tab-pois" hidden>
     <form class="mod-form" id="poi-form" autocomplete="off">
@@ -531,7 +592,7 @@ refresh();
 setInterval(refresh, 3000);
 
 // ---------- tabs ----------
-const TABS = ['files', 'links', 'installed', 'pois'];
+const TABS = ['files', 'links', 'installed', 'pois', 'models'];
 let currentTab = 'files';
 function showTab(name) {
   currentTab = name;
@@ -539,6 +600,7 @@ function showTab(name) {
   $('tab-files').hidden = name !== 'files';
   $('tab-mods').hidden = name !== 'links' && name !== 'installed'; // both mod tabs share one form and list
   $('tab-pois').hidden = name !== 'pois';
+  $('tab-models').hidden = name !== 'models';
   if (name === 'links' || name === 'installed') renderMods();
   try { localStorage.setItem('tab', name); } catch {}
 }
@@ -907,6 +969,211 @@ $('poi-form').addEventListener('submit', async (e) => {
 refreshPois();
 setInterval(refreshPois, 4000);
 
+// ---------- models (Easy Model Entities packages) ----------
+let modelList = [];
+let canDeleteModels = false;
+let lastModelsJson = '';
+let modelFile = null;
+
+async function refreshModels() {
+  try {
+    const res = await fetch('/api/models', { cache: 'no-store' });
+    const text = await res.text();
+    if (text === lastModelsJson) return;
+    lastModelsJson = text;
+    const data = JSON.parse(text);
+    modelList = data.models;
+    canDeleteModels = data.canDelete;
+    renderModels();
+  } catch { lastModelsJson = ''; }
+}
+
+function modelState(m) {
+  if (m.status !== 'uploaded') return ['proposed', 'Proposed'];
+  if (m.pending) return ['pending', 'Update pending'];
+  return ['uploaded', 'On server'];
+}
+
+function copyButtonRow(cmd, title) {
+  const btn = el('button', { textContent: 'Copy', type: 'button' });
+  const box = el('div', { className: 'cmd', title: title || 'Click to copy' }, el('code', { textContent: cmd }), btn);
+  box.onclick = async () => {
+    const ok = await copyText(cmd);
+    btn.textContent = ok ? 'Copied!' : 'Copy failed';
+    btn.classList.toggle('copied', ok);
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  };
+  return box;
+}
+
+function renderModels() {
+  $('models-count').textContent = modelList.length || '';
+  const waiting = modelList.filter(m => m.status !== 'uploaded' || m.pending);
+  $('model-shown').textContent = modelList.length ? `${modelList.length}${waiting.length ? `, ${waiting.length} waiting for the server` : ''}` : '';
+
+  const tools = $('model-tools');
+  tools.replaceChildren();
+  if (modelList.length) {
+    tools.append(el('a', {
+      className: 'btn big', href: '/api/models/download?status=all&mark=1', download: 'models.zip',
+      textContent: `Download all for the server (${modelList.length})`, title: 'Downloads every model and marks them all as uploaded to the server',
+      onclick: () => setTimeout(() => { lastModelsJson = ''; refreshModels(); }, 1500),
+    }));
+    if (waiting.length && waiting.length !== modelList.length) {
+      tools.append(el('a', {
+        className: 'btn secondary ghost', href: '/api/models/download?status=proposed&mark=1', download: 'models-new.zip',
+        textContent: `Only the ${waiting.length} new`, title: 'Downloads only the models that are not on the server yet and marks them as uploaded',
+        onclick: () => setTimeout(() => { lastModelsJson = ''; refreshModels(); }, 1500),
+      }));
+    }
+    tools.append(el('a', { className: 'all', href: '/api/models/download?status=all', download: 'models.zip', textContent: 'download without marking' }));
+  }
+
+  const grid = $('model-grid');
+  grid.replaceChildren();
+  if (!modelList.length) {
+    grid.append(el('div', { className: 'empty', textContent: 'No models yet. Upload the first one above!' }));
+    return;
+  }
+  for (const m of [...modelList].sort((a, b) => b.added - a.added)) {
+    const [stateClass, stateText] = modelState(m);
+    const textures = el('div', { className: 'model-textures' });
+    for (const t of m.textures.slice(0, 8)) {
+      textures.append(el('figure', {}, el('img', { src: t.src, alt: t.name, title: `${t.id} (${t.width}x${t.height})`, loading: 'lazy' }), el('figcaption', { textContent: t.name, title: t.name })));
+    }
+    const tags = el('div', { className: 'poi-tags' }, el('span', { className: 'status ' + stateClass, textContent: stateText }));
+    for (const p of m.profiles.slice(0, 3)) {
+      if (p.preset) tags.append(el('span', { className: 'tag', textContent: p.preset }));
+      for (const a of p.animations.slice(0, 6)) tags.append(el('span', { className: 'tag', textContent: '▶ ' + a }));
+    }
+    const meta = [m.file, fmtSize(m.size || 0), 'added ' + (m.by ? `by ${m.by} ` : '') + fmtDate(m.added)];
+    if (m.status === 'uploaded' && m.uploadedAt) meta.push('on server since ' + fmtDate(m.uploadedAt));
+    const card = el('div', { className: 'model ' + stateClass + (m.added > seenAt ? ' new' : '') },
+      el('div', { className: 'poi-top' }, el('div', { className: 'model-title', textContent: m.name }), tags),
+      textures,
+      el('div', { className: 'model-meta', textContent: meta.join(' · ') }));
+    if (m.note) card.append(el('div', { className: 'model-note', textContent: m.note }));
+    for (const w of m.warnings || []) card.append(el('div', { className: 'model-warn', textContent: '⚠ ' + w }));
+    for (const p of m.profiles) card.append(copyButtonRow(`/easy_model_entities summon ${p.summon}`, 'Spawns this model in the game (needs op)'));
+
+    // Skins: extra textures baked into the jar. Switched on per entity with the mod's texture command.
+    if (m.skins.length) {
+      for (const sk of m.skins) {
+        card.append(el('div', { className: 'skin-row' },
+          el('span', { className: 'skin-name', textContent: '🎨 ' + sk.name + (sk.by ? ` (${sk.by})` : '') }),
+          copyButtonRow(`/easy_model_entities texture set entity <UUID> slot default ${sk.id}`, 'Applies this skin to one entity. Replace <UUID> with the entity id')));
+      }
+    }
+    const skinInput = el('input', { type: 'file', accept: '.png', hidden: true });
+    skinInput.onchange = () => { if (skinInput.files[0]) addSkin(m, skinInput.files[0]); skinInput.value = ''; };
+    const actions = el('div', { className: 'actions' },
+      el('a', { className: 'btn', href: m.download, download: m.file, textContent: 'Download jar' }),
+      el('button', { className: 'ghost', type: 'button', textContent: 'Add skin', title: 'Add a PNG texture to this model', onclick: () => skinInput.click() }),
+      el('button', { className: 'ghost', type: 'button', textContent: m.status === 'uploaded' && !m.pending ? 'Mark as not on server' : 'Mark as on server',
+        onclick: () => patchModel(m, { status: m.status === 'uploaded' && !m.pending ? 'proposed' : 'uploaded' }) }),
+      el('button', { className: 'ghost', type: 'button', textContent: 'Edit', onclick: () => {
+        const name = prompt('Model name:', m.name);
+        if (name === null) return;
+        const note = prompt('Note:', m.note || '');
+        if (note === null) return;
+        patchModel(m, { name, note });
+      } }),
+      skinInput);
+    if (canDeleteModels) actions.append(el('button', { className: 'ghost danger', type: 'button', textContent: 'Delete', onclick: () => deleteModel(m) }));
+    card.append(el('div', { className: 'model-foot' }, el('span', { textContent: m.profiles.map(p => p.id).join(', ') }), actions));
+    grid.append(card);
+  }
+}
+
+async function patchModel(m, changes) {
+  const res = await fetch('/api/models/' + m.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Could not save');
+  lastModelsJson = '';
+  refreshModels();
+}
+
+async function deleteModel(m) {
+  if (!confirm(`Delete the model "${m.name}" and its files for everyone?`)) return;
+  const res = await fetch('/api/models/' + m.id, { method: 'DELETE' });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Delete failed');
+  lastModelsJson = '';
+  refreshModels();
+  lastJson = '';
+  refresh();
+}
+
+// One raw PUT with a progress bar in the models queue.
+function putRawJob(label, url, file) {
+  const info = el('span', { className: 'job-info', textContent: 'Uploading...' });
+  const fill = el('div');
+  const node = el('div', { className: 'job' },
+    el('div', { className: 'job-top' }, el('span', { className: 'job-name', textContent: label, title: label }), el('div', { className: 'actions' }, info)),
+    el('div', { className: 'bar' }, fill));
+  $('model-queue').prepend(node);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (e) => { if (e.total) { fill.style.width = (e.loaded / e.total * 100) + '%'; info.textContent = Math.round(e.loaded / e.total * 100) + '%'; } };
+    const done = (ok, text) => {
+      node.classList.add(ok ? 'done' : 'error');
+      info.textContent = text;
+      fill.style.width = '100%';
+      setTimeout(() => node.remove(), ok ? 6000 : 15000);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status === 201) { done(true, 'Done'); resolve(data); }
+      else { done(false, data.error || 'Upload failed'); reject(new Error(data.error || 'Upload failed')); }
+    };
+    xhr.onerror = () => { done(false, 'Connection lost'); reject(new Error('Connection lost')); };
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.send(file);
+  });
+}
+
+function setModelFile(file) {
+  modelFile = file;
+  $('model-picked').className = file ? 'ready' : '';
+  $('model-picked').textContent = file ? `${file.name} · ${fmtSize(file.size)}` : 'Nothing chosen yet. You can also drop the file onto this window.';
+  if (file && currentTab !== 'models') showTab('models');
+}
+$('model-pick').onclick = () => $('model-input').click();
+$('model-input').onchange = (e) => { if (e.target.files[0]) setModelFile(e.target.files[0]); e.target.value = ''; };
+
+$('model-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('model-status');
+  status.className = 'mod-status';
+  status.textContent = '';
+  if (!modelFile) { status.className = 'mod-status warn'; status.textContent = 'Choose the model .jar or .zip first.'; return; }
+  const q = new URLSearchParams({ name: $('model-name').value.trim(), note: $('model-note').value.trim(), by: myName(), filename: modelFile.name });
+  const file = modelFile;
+  setModelFile(null);
+  $('model-name').value = $('model-note').value = '';
+  try {
+    await putRawJob(file.name, '/api/models/upload?' + q, file);
+    lastModelsJson = '';
+    refreshModels();
+  } catch (err) {
+    status.className = 'mod-status warn';
+    status.textContent = err.message;
+  }
+});
+
+async function addSkin(m, file) {
+  const name = prompt('Name for this skin (letters, numbers, _ or -):', file.name.replace(/\.png$/i, '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_'));
+  if (name === null) return;
+  try {
+    await putRawJob(`${m.name}: skin ${name}`, `/api/models/${m.id}/skins?` + new URLSearchParams({ name, by: myName() }), file);
+    lastModelsJson = '';
+    refreshModels();
+  } catch (err) { alert(err.message); }
+}
+
+refreshModels();
+setInterval(refreshModels, 5000);
+
 // ---------- chat ----------
 let lastMsgId = 0;
 let lastMsg = null;
@@ -1198,6 +1465,7 @@ window.addEventListener('drop', (e) => {
   // Entries must be read now: the drop data is gone once this handler returns.
   const entries = [...(e.dataTransfer.items || [])].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
   if (!$('installer-modal').hidden) return pickReleaseFromDrop(entries, e.dataTransfer.files); // installer panel is open
+  if (currentTab === 'models' && e.dataTransfer.files.length === 1 && /\.(jar|zip)$/i.test(e.dataTransfer.files[0].name)) return setModelFile(e.dataTransfer.files[0]);
   if (!entries.length) return addFiles(e.dataTransfer.files);
   const loose = [];
   for (const entry of entries) {
@@ -1335,6 +1603,7 @@ $('installer-close').onclick = closeInstallerPanel;
 $('installer-modal').addEventListener('click', (e) => { if (e.target === $('installer-modal')) closeInstallerPanel(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('installer-modal').hidden) closeInstallerPanel(); });
 if (location.hash === '#installer') openInstallerPanel(); // bookmarkable: http://<host>:8080/#installer
+if (location.hash === '#models') { try { localStorage.setItem('tab', 'models'); } catch {} }
 
 function setRelItems(items, label) {
   relItems = items;

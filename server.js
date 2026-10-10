@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { pipeline } = require('stream');
-const { crc32 } = require('zlib');
+const zlib = require('zlib');
+const { crc32 } = zlib;
 
 const PORT = Number(process.env.PORT) || 8080;
 const SHARE_DIR = path.join(__dirname, 'shared');
@@ -14,6 +15,8 @@ const CHAT_FILE = path.join(__dirname, 'chat.jsonl'); // one message per line, k
 const MODS_FILE = path.join(__dirname, 'mods.json');
 const POIS_FILE = path.join(__dirname, 'pois.json');
 const RELEASES_FILE = path.join(__dirname, 'releases.json');
+const MODELS_FILE = path.join(__dirname, 'models.json');
+const MODELS_DIR = 'Models'; // folder inside shared/ with one subfolder per Easy Model Entities model
 const INSTALLER_DIR = 'Mods Installer'; // folder inside shared/ that holds one subfolder per installer version
 const CHUNK = 1 << 20; // 1 MB stream buffers for faster transfers
 
@@ -689,8 +692,8 @@ function packLE(fields) {
   return buf;
 }
 
-async function downloadZip(req, res, folder) {
-  const entries = zipEntries(folder.full, folder.name);
+async function downloadZip(req, res, folder, customEntries) {
+  const entries = customEntries || zipEntries(folder.full, folder.name);
 
   // Pass 1: work out every offset and the total size.
   let offset = 0;
@@ -850,6 +853,351 @@ function download(req, res, file) {
   pipeline(fs.createReadStream(file.full, { start, end, highWaterMark: CHUNK }), res, () => {});
 }
 
+
+// ---------- models (Easy Model Entities packages) ----------
+// A model is one jar: a data pack (server profile) plus a resource pack (render profile, .bbmodel, textures) with a
+// fabric.mod.json so Fabric loads it from the mods folder on the server and on every client. People upload a jar or
+// a zip; the server checks the layout, adds fabric.mod.json / pack.mcmeta when missing, and keeps it in
+// shared/Models/<name>/. Skins are PNGs baked into the jar as extra textures; the admin switches them on per entity
+// in game. Status "proposed" = waiting for the admin, "uploaded" = on the Minecraft server.
+
+let models = loadList(MODELS_FILE);
+let nextModelId = models.reduce((max, m) => Math.max(max, m.id), 0) + 1;
+const saveModels = () => saveList(MODELS_FILE, models);
+const MODEL_MAX = 64 * 1024 * 1024;
+const SKIN_MAX = 4 * 1024 * 1024;
+const PACK_FORMAT = 101; // Minecraft 26.3 resource/data pack format, only used when a pack has no pack.mcmeta
+const RL = '[a-z0-9_.\\/-]+'; // what Minecraft accepts in resource locations
+
+// Whole request body as one buffer; cb(null, true) when it is over `limit` bytes.
+function readRaw(req, limit, cb) {
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => { size += c.length; if (size <= limit) chunks.push(c); });
+  req.on('end', () => cb(size > limit ? null : Buffer.concat(chunks), size > limit));
+  req.on('error', () => cb(null, false));
+}
+
+function parseJsonSafe(buf) {
+  try { return JSON.parse(buf.toString('utf8').replace(/^﻿/, '')); } catch { return null; }
+}
+
+function pngInfo(buf) {
+  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47 || buf.readUInt32BE(4) !== 0x0d0a1a0a) return null;
+  if (buf.toString('ascii', 12, 16) !== 'IHDR') return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+// Reads a small zip/jar fully into memory: Map of path -> Buffer (folders skipped).
+function readZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65557); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('That is not a zip or jar file');
+  const count = buf.readUInt16LE(eocd + 10);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  if (cdOffset === MAX32 || count === 0xffff) throw new Error('Zip64 archives are not supported, keep the model under 4 GB');
+  const files = new Map();
+  let p = cdOffset;
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) throw new Error('The zip file is damaged');
+    const method = buf.readUInt16LE(p + 10);
+    const csize = buf.readUInt32LE(p + 20);
+    const usize = buf.readUInt32LE(p + 24);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    const localOff = buf.readUInt32LE(p + 42);
+    const name = buf.toString('utf8', p + 46, p + 46 + nameLen).replace(/\\/g, '/');
+    p += 46 + nameLen + extraLen + commentLen;
+    if (name.endsWith('/') || name.includes('../')) continue;
+    if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== 0x04034b50) throw new Error('The zip file is damaged');
+    const start = localOff + 30 + buf.readUInt16LE(localOff + 26) + buf.readUInt16LE(localOff + 28);
+    const raw = buf.subarray(start, start + csize);
+    let data;
+    if (method === 0) data = raw;
+    else if (method === 8) data = zlib.inflateRawSync(raw);
+    else throw new Error(`"${name}" uses a compression method this server cannot read`);
+    if (data.length !== usize) throw new Error(`"${name}" inside the zip is damaged`);
+    files.set(name, data);
+  }
+  return files;
+}
+
+// Map of path -> Buffer to a zip buffer (deflated, UTF-8 names).
+function writeZip(files) {
+  const parts = [];
+  const cd = [];
+  let offset = 0;
+  const t = dosTime(Date.now());
+  for (const [name, data] of files) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const deflated = zlib.deflateRawSync(data, { level: 6 });
+    const method = deflated.length < data.length ? 8 : 0;
+    const body = method ? deflated : data;
+    const crc = crc32(data);
+    const local = packLE([[0x04034b50, 4], [20, 2], [0x0800, 2], [method, 2], [t.time, 2], [t.date, 2], [crc, 4],
+      [body.length, 4], [data.length, 4], [nameBuf.length, 2], [0, 2]]);
+    parts.push(local, nameBuf, body);
+    cd.push(packLE([[0x02014b50, 4], [20, 2], [20, 2], [0x0800, 2], [method, 2], [t.time, 2], [t.date, 2], [crc, 4],
+      [body.length, 4], [data.length, 4], [nameBuf.length, 2], [0, 2], [0, 2], [0, 2], [0, 2], [0x20, 4], [offset, 4]]), nameBuf);
+    offset += local.length + nameBuf.length + body.length;
+  }
+  const cdBuf = Buffer.concat(cd);
+  return Buffer.concat([...parts, cdBuf, packLE([[0x06054b50, 4], [0, 2], [0, 2], [files.size, 2], [files.size, 2], [cdBuf.length, 4], [offset, 4], [0, 2]])]);
+}
+
+// Reads the Easy Model Entities layout out of a pack: which entity profiles, models and textures it has, and what is wrong.
+function inspectModel(files) {
+  const info = { namespaces: new Set(), profiles: [], textures: [], errors: [], warnings: [] };
+  const renderRe = new RegExp(`^assets/(${RL})/easy_model_entities/render_profiles/entity/(${RL})\\.json$`);
+  const serverRe = new RegExp(`^data/(${RL})/easy_model_entities/profiles/entity/(${RL})\\.json$`);
+  const modelRe = new RegExp(`^assets/(${RL})/easy_model_entities/models/(${RL})\\.bbmodel$`);
+  const textureRe = new RegExp(`^assets/(${RL})/textures/entity/(${RL})\\.png$`);
+  const renders = new Map();
+  const servers = new Map();
+  const bbmodels = new Map();
+  for (const [name, data] of files) {
+    let m;
+    if ((m = renderRe.exec(name))) { renders.set(`${m[1]}:${m[2]}`, parseJsonSafe(data)); info.namespaces.add(m[1]); }
+    else if ((m = serverRe.exec(name))) { servers.set(`${m[1]}:${m[2]}`, parseJsonSafe(data)); info.namespaces.add(m[1]); }
+    else if ((m = modelRe.exec(name))) bbmodels.set(`${m[1]}:easy_model_entities/models/${m[2]}`, parseJsonSafe(data));
+    else if ((m = textureRe.exec(name))) {
+      const png = pngInfo(data);
+      info.textures.push({ namespace: m[1], name: m[2], id: `${m[1]}:textures/entity/${m[2]}.png`, path: name, width: png ? png.width : 0, height: png ? png.height : 0 });
+    } else if (/^(assets|data)\//.test(name) && !new RegExp(`^${RL}$`).test(name)) {
+      info.warnings.push(`"${name}" has characters Minecraft refuses (use lowercase a-z, 0-9, _ - .)`);
+    }
+  }
+  for (const [id, render] of renders) {
+    const server = servers.get(id);
+    if (!server) { info.errors.push(`Render profile ${id} has no server profile (data/<pack>/easy_model_entities/profiles/entity/<name>.json)`); continue; }
+    const [ns, part] = id.split(':');
+    const modelId = (render && render.model) || `${ns}:easy_model_entities/models/${part}`;
+    const bbm = bbmodels.get(modelId);
+    if (!bbm) info.errors.push(`${id}: model "${modelId}.bbmodel" is missing`);
+    const texture = (render && render.texture) || `${ns}:textures/entity/${part}.png`;
+    if (!info.textures.some((t) => t.id === texture)) info.errors.push(`${id}: texture "${texture}" is missing`);
+    info.profiles.push({
+      id, summon: `${ns}:entity/${part}`, namespace: ns, name: part, model: modelId, texture,
+      preset: (render && render.preset_type) || (server && server.preset_type) || '',
+      version: (render && render.version) || '',
+      animations: Array.isArray(bbm && bbm.animations) ? bbm.animations.map((a) => a && a.name).filter(Boolean).slice(0, 40) : [],
+    });
+  }
+  for (const id of servers.keys()) if (!renders.has(id)) info.errors.push(`Server profile ${id} has no render profile (assets/<pack>/easy_model_entities/render_profiles/entity/<name>.json)`);
+  if (!info.profiles.length && !info.errors.length) {
+    info.errors.push('No Easy Model Entities entity profiles found. Expected data/<pack>/easy_model_entities/profiles/entity/<name>.json and assets/<pack>/easy_model_entities/render_profiles/entity/<name>.json');
+  }
+  return info;
+}
+
+const modIdOf = (ns) => ns.replace(/[^a-z0-9_-]/g, '_').replace(/^[^a-z]+/, 'm').slice(0, 63);
+
+// Makes sure the pack is a loadable Fabric mod. Returns the original bytes untouched when nothing had to change,
+// so a jar someone built themselves is stored exactly as they made it.
+function buildModelJar(original, files, info, meta, version) {
+  const ns = [...info.namespaces][0];
+  const fmjRaw = files.get('fabric.mod.json');
+  let fmj = fmjRaw ? parseJsonSafe(fmjRaw) : null;
+  const needsFmj = !fmj || !fmj.id || (version && fmj.version !== version);
+  const needsMeta = !files.has('pack.mcmeta');
+  if (!needsFmj && !needsMeta && !meta.changed) return { data: original, version: fmj.version || '' };
+  const out = new Map(files);
+  fmj = fmj && typeof fmj === 'object' ? fmj : {};
+  fmj = {
+    schemaVersion: 1, id: modIdOf(ns), name: meta.name, description: `Easy Model Entities model: ${meta.name}`, environment: '*',
+    ...fmj,
+    version: version || fmj.version || '1.0.0',
+    depends: { fabricloader: '*', easy_model_entities: '*', ...(fmj.depends && typeof fmj.depends === 'object' ? fmj.depends : {}) },
+  };
+  if (meta.by && !(Array.isArray(fmj.authors) && fmj.authors.length)) fmj.authors = [meta.by];
+  out.set('fabric.mod.json', Buffer.from(JSON.stringify(fmj, null, 2)));
+  if (needsMeta) {
+    out.set('pack.mcmeta', Buffer.from(JSON.stringify({ pack: { description: `${meta.name} resources`, min_format: PACK_FORMAT, max_format: PACK_FORMAT } }, null, 2)));
+  }
+  return { data: writeZip(out), version: fmj.version };
+}
+
+const modelDir = (m) => path.join(SHARE_DIR, MODELS_DIR, m.folder);
+
+// Writes the jar and the texture previews into the model's folder and refreshes the stored facts about it.
+function storeModel(m, jarData, files, info) {
+  const dir = modelDir(m);
+  fs.mkdirSync(path.join(dir, 'textures'), { recursive: true });
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isFile() && e.name.toLowerCase().endsWith('.jar') && e.name !== m.file) fs.rmSync(path.join(dir, e.name), { force: true });
+  }
+  fs.writeFileSync(path.join(dir, m.file), jarData);
+  fs.rmSync(path.join(dir, 'textures'), { recursive: true, force: true });
+  fs.mkdirSync(path.join(dir, 'textures'));
+  m.textures = info.textures.map((t) => {
+    const file = `${t.namespace}__${t.name.replace(/\//g, '__')}.png`;
+    fs.writeFileSync(path.join(dir, 'textures', file), files.get(t.path));
+    return { id: t.id, name: t.name, file, width: t.width, height: t.height };
+  });
+  m.profiles = info.profiles;
+  m.namespace = [...info.namespaces][0];
+  m.size = jarData.length;
+  m.sha256 = require('crypto').createHash('sha256').update(jarData).digest('hex');
+  m.warnings = info.warnings.slice(0, 10);
+  touched(dir, false);
+}
+
+function modelInfo(m, req) {
+  const host = req.headers.host || 'localhost';
+  return {
+    ...m,
+    path: [MODELS_DIR, m.folder].join('/'),
+    download: '/files/' + encSegs([MODELS_DIR, m.folder, m.file]),
+    url: `http://${host}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
+    textures: (m.textures || []).map((t) => ({ ...t, src: `/api/models/${m.id}/texture/${encodeURIComponent(t.file)}` })),
+    pending: m.status === 'uploaded' && m.uploadedFile !== m.file, // changed since the admin last put it on the server
+  };
+}
+
+function listModels(req, res) {
+  const list = [];
+  for (const m of models) if (fs.existsSync(path.join(modelDir(m), m.file))) list.push(modelInfo(m, req));
+  if (list.length !== models.length) { // folders removed in the Files tab
+    models = models.filter((m) => list.some((i) => i.id === m.id));
+    saveModels();
+  }
+  sendJson(res, 200, {
+    models: list, canDelete: isLocal(req),
+    packEntriesUrl: `http://${req.headers.host || 'localhost'}/api/models/pack-entries?status=uploaded`,
+  });
+}
+
+// PUT /api/models/upload?name=&note=&by=&filename=   body = the jar or zip
+function uploadModel(req, res, url) {
+  readRaw(req, MODEL_MAX, (buf, tooBig) => {
+    if (tooBig) return sendJson(res, 413, { error: `Models are limited to ${formatSize(MODEL_MAX)}` });
+    if (!buf || !buf.length) return sendJson(res, 400, { error: 'No file received' });
+    let files;
+    let info;
+    try { files = readZip(buf); info = inspectModel(files); } catch (e) { return sendJson(res, 400, { error: e.message }); }
+    if (info.errors.length) return sendJson(res, 400, { error: 'This is not a complete Easy Model Entities pack:\n' + info.errors.join('\n') });
+    const ns = [...info.namespaces][0];
+    const fmj = files.has('fabric.mod.json') ? parseJsonSafe(files.get('fabric.mod.json')) : null;
+    const name = cleanText(url.searchParams.get('name'), 80) || cleanText(fmj && fmj.name, 80) || ns.replace(/[_-]+/g, ' ');
+    if (models.some((m) => m.namespace === ns)) return sendJson(res, 409, { error: `A model with the pack name "${ns}" already exists. Delete it first or use a different namespace.` });
+
+    const uploadedName = cleanName(url.searchParams.get('filename') || `${ns}.jar`);
+    const modId = modIdOf(ns);
+    let file = uploadedName.toLowerCase().endsWith('.jar') && uploadedName.toLowerCase().startsWith(modId + '-') ? uploadedName : null;
+    const built = buildModelJar(buf, files, info, { name, by: cleanText(url.searchParams.get('by'), 24), changed: false }, null);
+    if (!file) file = cleanName(`${modId}-${(built.version || '1.0.0').replace(/[^\w.+-]/g, '_')}.jar`);
+    const parent = path.join(SHARE_DIR, MODELS_DIR);
+    fs.mkdirSync(parent, { recursive: true });
+    const folder = uniqueName(parent, cleanName(name), true);
+    const m = {
+      id: nextModelId++, name, note: cleanText(url.searchParams.get('note'), 300), by: cleanText(url.searchParams.get('by'), 24),
+      added: Date.now(), folder, file, baseFile: file, build: 1, version: built.version || '', status: 'proposed', uploadedFile: null, uploadedAt: null, skins: [],
+    };
+    try { storeModel(m, built.data, files, info); } catch (e) { return sendJson(res, 500, { error: 'Could not save the model: ' + e.message }); }
+    models.push(m);
+    saveModels();
+    log(req, `model added      ${name} (${file}, ${formatSize(m.size)})${m.by ? ' by ' + m.by : ''}`);
+    sendJson(res, 201, modelInfo(m, req));
+  });
+}
+
+// PUT /api/models/:id/skins?name=&by=   body = a PNG. It becomes assets/<pack>/textures/entity/<name>.png in a rebuilt jar.
+function uploadSkin(req, res, m, url) {
+  readRaw(req, SKIN_MAX, (buf, tooBig) => {
+    if (tooBig) return sendJson(res, 413, { error: `Skins are limited to ${formatSize(SKIN_MAX)}` });
+    const png = buf && pngInfo(buf);
+    if (!png) return sendJson(res, 400, { error: 'Skins must be PNG files' });
+    if (png.width > 2048 || png.height > 2048) return sendJson(res, 400, { error: 'Easy Model Entities ignores textures over 2048 pixels' });
+    const skin = String(url.searchParams.get('name') || '').toLowerCase().replace(/\.png$/, '').replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+    if (!skin) return sendJson(res, 400, { error: 'The skin needs a name (letters, numbers, _ or -)' });
+    const texturePath = `assets/${m.namespace}/textures/entity/${skin}.png`;
+    let files;
+    try { files = readZip(fs.readFileSync(path.join(modelDir(m), m.file))); } catch (e) { return sendJson(res, 500, { error: 'Could not read the stored model: ' + e.message }); }
+    if (files.has(texturePath)) return sendJson(res, 409, { error: `This model already has a texture called "${skin}"` });
+    files.set(texturePath, buf);
+    const info = inspectModel(files);
+    m.build += 1;
+    const base = (m.version || '1.0.0').replace(/\+b\d+$/, '');
+    const version = `${base}+b${m.build}`;
+    m.file = m.baseFile.replace(/\.jar$/i, '') + `+b${m.build}.jar`;
+    const built = buildModelJar(null, files, info, { name: m.name, by: m.by, changed: true }, version);
+    m.version = built.version;
+    try { storeModel(m, built.data, files, info); } catch (e) { return sendJson(res, 500, { error: 'Could not save the model: ' + e.message }); }
+    m.skins.push({ name: skin, id: `${m.namespace}:textures/entity/${skin}.png`, by: cleanText(url.searchParams.get('by'), 24), added: Date.now(), width: png.width, height: png.height });
+    saveModels();
+    log(req, `skin added       ${m.name}: ${skin} -> ${m.file}`);
+    sendJson(res, 201, modelInfo(m, req));
+  });
+}
+
+function patchModel(req, res, m) {
+  readJson(req, (body) => {
+    if (!body) return sendJson(res, 400, { error: 'Bad request' });
+    if ('note' in body) m.note = cleanText(body.note, 300);
+    if ('name' in body) {
+      const name = cleanText(body.name, 80);
+      if (!name) return sendJson(res, 400, { error: 'The model needs a name' });
+      m.name = name;
+    }
+    if ('status' in body) {
+      if (body.status === 'uploaded') { m.status = 'uploaded'; m.uploadedFile = typeof body.file === 'string' && body.file ? body.file : m.file; m.uploadedAt = Date.now(); }
+      else if (body.status === 'proposed') { m.status = 'proposed'; m.uploadedFile = null; m.uploadedAt = null; }
+    }
+    saveModels();
+    log(req, `model updated    ${m.name} (${m.status}${m.uploadedFile && m.uploadedFile !== m.file ? ', update pending' : ''})`);
+    sendJson(res, 200, modelInfo(m, req));
+  });
+}
+
+// What the installer and the admin's apply command read: one entry per model in the pack.json mod format.
+function modelPackEntries(req, res, url) {
+  const status = url.searchParams.get('status') || 'uploaded';
+  const host = req.headers.host || 'localhost';
+  const list = models
+    .filter((m) => status === 'all' || (status === 'proposed' ? m.status !== 'uploaded' || m.uploadedFile !== m.file : m.status === 'uploaded'))
+    .filter((m) => fs.existsSync(path.join(modelDir(m), m.file)))
+    .map((m) => ({
+      id: m.id, name: m.name, match: `${modIdOf(m.namespace)}-*.jar`, file: m.file, sha256: m.sha256,
+      url: `http://${host}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
+      page: `http://${host}/#models`, status: m.status, pending: m.status === 'uploaded' && m.uploadedFile !== m.file,
+    }));
+  sendJson(res, 200, list);
+}
+
+function downloadModels(req, res, url) {
+  const status = url.searchParams.get('status') || 'all';
+  const chosen = models.filter((m) => status === 'all' || (status === 'proposed' ? m.status !== 'uploaded' || m.uploadedFile !== m.file : m.status === 'uploaded'));
+  const entries = [{ dir: true, full: path.join(SHARE_DIR, MODELS_DIR), zipPath: 'models/', size: 0, mtime: Date.now() }];
+  for (const m of chosen) {
+    const full = path.join(modelDir(m), m.file);
+    try {
+      const s = fs.statSync(full);
+      entries.push({ dir: false, full, zipPath: 'models/' + m.file, size: s.size, mtime: s.mtimeMs });
+    } catch { /* missing jar, skip it */ }
+  }
+  if (entries.length === 1) return sendJson(res, 404, { error: 'No models to download' });
+  // ?mark=1 is the admin's "download for the server" button: every model in the zip counts as uploaded from now on.
+  if (url.searchParams.get('mark') === '1' && req.method === 'GET') {
+    for (const m of chosen) { m.status = 'uploaded'; m.uploadedFile = m.file; m.uploadedAt = Date.now(); }
+    saveModels();
+    log(req, `models marked    ${chosen.length} model${chosen.length === 1 ? '' : 's'} as uploaded (download)`);
+  }
+  return downloadZip(req, res, { full: path.join(SHARE_DIR, MODELS_DIR), name: 'models', segs: [MODELS_DIR] }, entries);
+}
+
+function modelTexture(req, res, m, fileRaw) {
+  let file = '';
+  try { file = decodeURIComponent(fileRaw); } catch { /* bad escape */ }
+  const t = (m.textures || []).find((x) => x.file === file);
+  const full = t && path.join(modelDir(m), 'textures', t.file);
+  if (!t || !fs.existsSync(full)) return sendJson(res, 404, { error: 'Texture not found' });
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
+  fs.createReadStream(full).pipe(res);
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -892,6 +1240,28 @@ const server = http.createServer((req, res) => {
       if (req.method === 'POST' && action === 'done') return finishRelease(req, res, release, url);
       if (req.method === 'PATCH' && !action) return patchRelease(req, res, release);
       if (req.method === 'DELETE' && !action) return deleteRelease(req, res, release, url);
+    }
+
+    if (req.method === 'GET' && p === '/api/models') return listModels(req, res);
+    if (req.method === 'PUT' && p === '/api/models/upload') return uploadModel(req, res, url);
+    if (req.method === 'GET' && p === '/api/models/pack-entries') return modelPackEntries(req, res, url);
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/api/models/download') return downloadModels(req, res, url);
+    if (p.startsWith('/api/models/')) {
+      const [idPart, action, extra] = p.slice('/api/models/'.length).split('/');
+      const m = models.find((x) => String(x.id) === idPart);
+      if (!m) return sendJson(res, 404, { error: 'Model not found' });
+      if (req.method === 'GET' && action === 'texture' && extra) return modelTexture(req, res, m, extra);
+      if (req.method === 'PUT' && action === 'skins') return uploadSkin(req, res, m, url);
+      if (req.method === 'PATCH' && !action) return patchModel(req, res, m);
+      if (req.method === 'DELETE' && !action) {
+        if (!isLocal(req)) return sendJson(res, 403, { error: 'Only the host PC can delete models' });
+        fs.rmSync(modelDir(m), { recursive: true, force: true });
+        touched(modelDir(m), false);
+        models = models.filter((x) => x !== m);
+        saveModels();
+        log(req, `model removed    ${m.name}`);
+        return sendJson(res, 200, { ok: true });
+      }
     }
 
     if (req.method === 'GET' && p === '/api/pois') return sendJson(res, 200, { pois, types: POI_TYPES, canDelete: isLocal(req) });
@@ -965,5 +1335,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  Mods are saved in:   ${MODS_FILE} (${mods.length} mods)`);
   console.log(`  Places are saved in: ${POIS_FILE} (${pois.length} places)`);
   console.log(`  Installer versions:  ${RELEASES_FILE} (${releases.length} versions)`);
+  console.log(`  Models:              ${MODELS_FILE} (${models.length} models)`);
   console.log('  Close this window to stop the server.\n');
 });

@@ -5,4 +5,5 @@ chat.jsonl
 mods.json
 pois.json
 releases.json
+models.json
 *.tmp
