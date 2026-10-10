@@ -1167,6 +1167,65 @@ function modelPackEntries(req, res, url) {
   sendJson(res, 200, list);
 }
 
+
+// "2026-10-11.3" -> "2026-10-11.4", "1.4.2" -> "1.4.3", "beta" -> "beta.1"; keeps going until the version is unused.
+function nextVersion(version) {
+  let v = version;
+  do {
+    const m = /^(.*?)(\d+)$/.exec(v);
+    v = m ? m[1] + (Number(m[2]) + 1) : v + '.1';
+  } while (releases.some((r) => r.version.toLowerCase() === v.toLowerCase()));
+  return v;
+}
+
+// After models were marked as uploaded: publish a new installer version based on the current Recent one, so players
+// see "updated" in the banner. Its pack.json gets the bumped version, this site's model feed under modListUrls, and the
+// uploaded model jars bundled as a fallback for when the site is unreachable.
+function autoReleasePack(req, changedModels) {
+  const ready = releases.filter((r) => r.status === 'ready').sort((a, b) => b.added - a.added);
+  const base = ready.find((r) => r.tags.includes('Recent')) || ready[0];
+  if (!base) return null;
+  const baseDir = path.join(SHARE_DIR, INSTALLER_DIR, base.folder);
+  const packFile = path.join(baseDir, 'pack.json');
+  if (!fs.existsSync(packFile)) { log(req, `pack update      skipped: ${base.folder} has no pack.json at its top level`); return null; }
+  const pack = parseJsonSafe(fs.readFileSync(packFile));
+  if (!pack || !Array.isArray(pack.mods)) { log(req, `pack update      skipped: ${base.folder}/pack.json is not readable`); return null; }
+
+  const version = nextVersion(String(pack.packVersion || base.version || '1'));
+  const parent = path.join(SHARE_DIR, INSTALLER_DIR);
+  const folder = uniqueName(parent, cleanName(`Mods Installer ${/^\d/.test(version) ? 'v' : ''}${version}`), true);
+  const dir = path.join(parent, folder);
+  fs.cpSync(baseDir, dir, { recursive: true });
+
+  const host = req.headers.host || 'localhost';
+  const feed = `http://${host}/api/models/pack-entries?status=uploaded`;
+  pack.packVersion = version;
+  pack.modListUrls = [...(Array.isArray(pack.modListUrls) ? pack.modListUrls : []).filter((u) => typeof u === 'string' && !/FRIEND-PC|\/api\/models\/pack-entries/.test(u)), feed];
+  fs.mkdirSync(path.join(dir, 'mods'), { recursive: true });
+  for (const m of models.filter((x) => x.status === 'uploaded')) {
+    const match = `${modIdOf(m.namespace)}-*.jar`;
+    for (const e of fs.readdirSync(path.join(dir, 'mods'))) {
+      if (e.startsWith(`${modIdOf(m.namespace)}-`) && e.toLowerCase().endsWith('.jar') && e !== m.file) fs.rmSync(path.join(dir, 'mods', e), { force: true });
+    }
+    try { fs.copyFileSync(path.join(modelDir(m), m.file), path.join(dir, 'mods', m.file)); } catch { continue; }
+    const entry = { name: m.name, match, localFile: `mods/${m.file}` };
+    const i = pack.mods.findIndex((x) => x && x.match === match);
+    if (i >= 0) pack.mods[i] = { ...pack.mods[i], ...entry }; else pack.mods.push(entry);
+  }
+  fs.writeFileSync(packFile.replace(baseDir, dir), JSON.stringify(pack, null, 2) + '\n');
+  touched(dir, false);
+
+  const names = changedModels.map((m) => m.name).join(', ');
+  const release = {
+    id: nextReleaseId++, version, tags: ['Recent'], note: `Models updated: ${names}`, by: 'models', added: Date.now(), folder, status: 'ready',
+  };
+  releases.push(release);
+  claimRecent(release);
+  saveReleases();
+  log(req, `pack update      ${folder} from ${base.folder} (${names})`);
+  return release;
+}
+
 function downloadModels(req, res, url) {
   const status = url.searchParams.get('status') || 'all';
   const chosen = models.filter((m) => status === 'all' || (status === 'proposed' ? m.status !== 'uploaded' || m.uploadedFile !== m.file : m.status === 'uploaded'));
@@ -1181,9 +1240,11 @@ function downloadModels(req, res, url) {
   if (entries.length === 1) return sendJson(res, 404, { error: 'No models to download' });
   // ?mark=1 is the admin's "download for the server" button: every model in the zip counts as uploaded from now on.
   if (url.searchParams.get('mark') === '1' && req.method === 'GET') {
+    const changed = chosen.filter((m) => m.status !== 'uploaded' || m.uploadedFile !== m.file);
     for (const m of chosen) { m.status = 'uploaded'; m.uploadedFile = m.file; m.uploadedAt = Date.now(); }
     saveModels();
     log(req, `models marked    ${chosen.length} model${chosen.length === 1 ? '' : 's'} as uploaded (download)`);
+    if (changed.length) autoReleasePack(req, changed); // new installer version so players know to run it again
   }
   return downloadZip(req, res, { full: path.join(SHARE_DIR, MODELS_DIR), name: 'models', segs: [MODELS_DIR] }, entries);
 }
