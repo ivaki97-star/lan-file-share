@@ -5,17 +5,35 @@ const path = require('path');
 const os = require('os');
 const { pipeline } = require('stream');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const { crc32 } = zlib;
 
+// ---------- configuration ----------
+// Settings come from the environment or a .env file next to server.js (KEY=value lines). Nothing is needed for a
+// LAN party: the defaults are the old behaviour. For a hosted server set MODE=hosted (see README, "Hosting").
+try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* no .env, or Node < 20.12 */ }
+const MODE = (process.env.MODE || 'lan').toLowerCase() === 'hosted' ? 'hosted' : 'lan';
+const AUTH = (process.env.AUTH || (MODE === 'hosted' ? 'on' : 'off')).toLowerCase() === 'on'; // accounts + login
+const DATA_DIR = path.resolve(process.env.DATA_DIR || __dirname); // where shared/ and the json files live
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, ''); // e.g. https://share.example.com, used in links the installer follows
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''; // lets the deploy command on the Minecraft server act as admin
+const INVITE_CODE = process.env.INVITE_CODE || ''; // needed to register when set
+const TRUST_PROXY = (process.env.TRUST_PROXY || (MODE === 'hosted' ? 'on' : 'off')).toLowerCase() === 'on'; // behind Caddy/nginx
+const BIND = process.env.BIND || '0.0.0.0';
+
 const PORT = Number(process.env.PORT) || 8080;
-const SHARE_DIR = path.join(__dirname, 'shared');
-const INCOMING_DIR = path.join(__dirname, 'incoming'); // partial uploads, moved into SHARE_DIR when complete
+const SHARE_DIR = path.join(DATA_DIR, 'shared');
+const INCOMING_DIR = path.join(DATA_DIR, 'incoming'); // partial uploads, moved into SHARE_DIR when complete
 const INDEX_FILE = path.join(__dirname, 'public', 'index.html');
-const CHAT_FILE = path.join(__dirname, 'chat.jsonl'); // one message per line, kept forever
-const MODS_FILE = path.join(__dirname, 'mods.json');
-const POIS_FILE = path.join(__dirname, 'pois.json');
-const RELEASES_FILE = path.join(__dirname, 'releases.json');
-const MODELS_FILE = path.join(__dirname, 'models.json');
+const CHAT_FILE = path.join(DATA_DIR, 'chat.jsonl'); // one message per line, kept forever
+const MODS_FILE = path.join(DATA_DIR, 'mods.json');
+const POIS_FILE = path.join(DATA_DIR, 'pois.json');
+const RELEASES_FILE = path.join(DATA_DIR, 'releases.json');
+const MODELS_FILE = path.join(DATA_DIR, 'models.json');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const DEPLOYS_FILE = path.join(DATA_DIR, 'deploys.json');
+const SECRET_FILE = path.join(DATA_DIR, 'secret.key'); // signs session cookies, created on first start
+const DATA_FILES = ['chat.jsonl', 'mods.json', 'pois.json', 'releases.json', 'models.json', 'users.json', 'deploys.json'];
 const MODELS_DIR = 'Models'; // folder inside shared/ with one subfolder per Easy Model Entities model
 const INSTALLER_DIR = 'Mods Installer'; // folder inside shared/ that holds one subfolder per installer version
 const CHUNK = 1 << 20; // 1 MB stream buffers for faster transfers
@@ -23,6 +41,9 @@ const CHUNK = 1 << 20; // 1 MB stream buffers for faster transfers
 fs.mkdirSync(SHARE_DIR, { recursive: true });
 fs.rmSync(INCOMING_DIR, { recursive: true, force: true }); // drop leftovers from a crash
 fs.mkdirSync(INCOMING_DIR, { recursive: true });
+
+// node server.js --export backup.zip   /   node server.js --import backup.zip   (see the bottom of this file)
+const CLI = process.argv[2] && process.argv[2].startsWith('--') ? { cmd: process.argv[2].slice(2), file: process.argv[3] } : null;
 
 const chat = [];
 if (fs.existsSync(CHAT_FILE)) {
@@ -147,12 +168,27 @@ function touched(full, uploading) {
 }
 
 function isLocal(req) {
+  if (TRUST_PROXY) return false; // behind a proxy every request looks local; rights come from accounts instead
   const ip = req.socket.remoteAddress || '';
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
 function clientIp(req) {
-  return (req.socket.remoteAddress || '?').replace(/^::ffff:/, '');
+  const fwd = TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return (fwd || req.socket.remoteAddress || '?').replace(/^::ffff:/, '');
+}
+
+// Who may delete things and manage the site: an admin account, the deploy command's token, or (LAN mode without
+// accounts) the host PC itself, as before.
+function isAdmin(req) {
+  if (req.user && req.user.role === 'admin') return true;
+  if (ADMIN_TOKEN && req.headers['x-admin-token'] === ADMIN_TOKEN) return true;
+  return !AUTH && isLocal(req);
+}
+
+// The site's own address for links that other machines follow (the installer, the deploy command).
+function siteBase(req) {
+  return PUBLIC_URL || `http://${req.headers.host || 'localhost'}`;
 }
 
 function sendJson(res, status, body) {
@@ -196,7 +232,7 @@ function listFiles(req, res, url) {
     const s = fs.statfsSync(SHARE_DIR);
     free = s.bavail * s.bsize;
   } catch { /* not supported */ }
-  sendJson(res, 200, { path: dir.segs.join('/'), entries, free, canDelete: isLocal(req) });
+  sendJson(res, 200, { path: dir.segs.join('/'), entries, free, canDelete: isAdmin(req) });
 }
 
 // A folder upload starts by reserving its name, so two people uploading "Mods" get "Mods" and "Mods (1)".
@@ -253,7 +289,7 @@ function postChat(req, res) {
   readJson(req, (body, tooBig) => {
     if (tooBig) return sendJson(res, 413, { error: 'That message is over 1 MB' });
     if (!body) return sendJson(res, 400, { error: 'Bad message' });
-    const name = String(body.name || '').replace(/[\x00-\x1f]/g, '').trim().slice(0, 24);
+    const name = req.user ? req.user.name : String(body.name || '').replace(/[\x00-\x1f]/g, '').trim().slice(0, 24);
     const text = String(body.text || '').replace(/\r/g, '').trim();
     if (!name || !text) return sendJson(res, 400, { error: 'Name and message are required' });
 
@@ -286,7 +322,7 @@ function postMod(req, res) {
     if (url === null) return sendJson(res, 400, { error: 'That link doesn\'t look valid' });
     const name = cleanText(body.name, 150);
     if (!name) return sendJson(res, 400, { error: 'The mod needs a name' });
-    const by = cleanText(body.by, 24);
+    const by = req.user ? req.user.name : cleanText(body.by, 24);
     const mod = { id: nextModId++, name, url, note: cleanText(body.note, 200), installed: !!body.installed, by, added: Date.now() };
     mods.push(mod);
     saveMods();
@@ -474,7 +510,7 @@ function postPoi(req, res) {
     const [poi, error] = applyPoi({}, body);
     if (error) return sendJson(res, 400, { error });
     poi.id = nextPoiId++;
-    poi.by = cleanText(body.by, 24);
+    poi.by = req.user ? req.user.name : cleanText(body.by, 24);
     poi.added = Date.now();
     pois.push(poi);
     savePois();
@@ -524,7 +560,7 @@ function releaseInfo(r) {
     size: s.size,
     count: s.count,
     path: segs.join('/'),
-    download: single ? '/files/' + encSegs([...segs, single]) : '/zip/' + encSegs(segs),
+    download: single ? '/files/' + encSegs([...segs, single]) : `/api/releases/${r.id}/download`,
     downloadName: single || r.folder + '.zip',
   };
 }
@@ -540,7 +576,7 @@ function listReleases(req, res) {
     releases = releases.filter((r) => list.some((i) => i.id === r.id));
     saveReleases();
   }
-  sendJson(res, 200, { releases: list, tags: RELEASE_TAGS, canDelete: isLocal(req) });
+  sendJson(res, 200, { releases: list, tags: RELEASE_TAGS, canDelete: isAdmin(req) });
 }
 
 function postRelease(req, res) {
@@ -560,7 +596,7 @@ function postRelease(req, res) {
 
     const release = {
       id: nextReleaseId++, version, tags: cleanTags(body.tags), note: String(body.note || '').replace(/\r/g, '').trim().slice(0, 500),
-      by: cleanText(body.by, 24), added: Date.now(), folder, status: 'uploading',
+      by: req.user ? req.user.name : cleanText(body.by, 24), added: Date.now(), folder, status: 'uploading',
     };
     releases.push(release);
     saveReleases();
@@ -597,7 +633,7 @@ function patchRelease(req, res, release) {
 function deleteRelease(req, res, release, url) {
   // The uploader may cancel their own unfinished upload; anything else is host-only, like deleting files.
   const ownUpload = release.status === 'uploading' && releaseTokens.get(release.id) === url.searchParams.get('token');
-  if (!ownUpload && !isLocal(req)) return sendJson(res, 403, { error: 'Only the host PC can delete versions' });
+  if (!ownUpload && !isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can delete versions' });
   const full = path.join(SHARE_DIR, INSTALLER_DIR, release.folder);
   fs.rmSync(full, { recursive: true, force: true });
   touched(full, false);
@@ -737,7 +773,7 @@ async function downloadZip(req, res, folder, customEntries) {
   const ahead = new Map(); // entry index -> Promise<Buffer>
   const readAhead = (i) => {
     const e = entries[i];
-    if (!e || e.dir || e.size > SMALL || ahead.has(i)) return;
+    if (!e || e.dir || e.data || e.size > SMALL || ahead.has(i)) return;
     const p = e.size ? fs.promises.readFile(e.full) : Promise.resolve(Buffer.alloc(0));
     p.catch(() => {}); // handled when awaited; avoids an unhandled rejection if the download is abandoned
     ahead.set(i, p);
@@ -765,9 +801,9 @@ async function downloadZip(req, res, folder, customEntries) {
         continue;
       }
 
-      if (e.size <= SMALL) {
+      if (e.data || e.size <= SMALL) {
         // Small file: one read and one write (game folders often hold thousands of these).
-        const data = await ahead.get(i);
+        const data = e.data || await ahead.get(i);
         ahead.delete(i);
         if (data.length !== e.size) throw new Error(`${e.zipPath} changed while zipping`);
         e.crc = crc32(data);
@@ -1040,18 +1076,17 @@ function storeModel(m, jarData, files, info) {
   m.profiles = info.profiles;
   m.namespace = [...info.namespaces][0];
   m.size = jarData.length;
-  m.sha256 = require('crypto').createHash('sha256').update(jarData).digest('hex');
+  m.sha256 = crypto.createHash('sha256').update(jarData).digest('hex');
   m.warnings = info.warnings.slice(0, 10);
   touched(dir, false);
 }
 
 function modelInfo(m, req) {
-  const host = req.headers.host || 'localhost';
   return {
     ...m,
     path: [MODELS_DIR, m.folder].join('/'),
     download: '/files/' + encSegs([MODELS_DIR, m.folder, m.file]),
-    url: `http://${host}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
+    url: `${siteBase(req)}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
     textures: (m.textures || []).map((t) => ({ ...t, src: `/api/models/${m.id}/texture/${encodeURIComponent(t.file)}` })),
     profiles: (m.profiles || []).map((p) => ({ ...p, bbmodel: `/api/models/${m.id}/bbmodel/${encodeURIComponent(p.name)}` })),
     pending: m.status === 'uploaded' && m.uploadedFile !== m.file, // changed since the admin last put it on the server
@@ -1066,8 +1101,8 @@ function listModels(req, res) {
     saveModels();
   }
   sendJson(res, 200, {
-    models: list, canDelete: isLocal(req),
-    packEntriesUrl: `http://${req.headers.host || 'localhost'}/api/models/pack-entries?status=uploaded`,
+    models: list, canDelete: isAdmin(req),
+    packEntriesUrl: `${siteBase(req)}/api/models/pack-entries?status=uploaded`,
   });
 }
 
@@ -1094,7 +1129,7 @@ function uploadModel(req, res, url) {
     fs.mkdirSync(parent, { recursive: true });
     const folder = uniqueName(parent, cleanName(name), true);
     const m = {
-      id: nextModelId++, name, note: cleanText(url.searchParams.get('note'), 300), by: cleanText(url.searchParams.get('by'), 24),
+      id: nextModelId++, name, note: cleanText(url.searchParams.get('note'), 300), by: req.user ? req.user.name : cleanText(url.searchParams.get('by'), 24),
       added: Date.now(), folder, file, baseFile: file, build: 1, version: built.version || '', status: 'proposed', uploadedFile: null, uploadedAt: null, skins: [],
     };
     try { storeModel(m, built.data, files, info); } catch (e) { return sendJson(res, 500, { error: 'Could not save the model: ' + e.message }); }
@@ -1156,14 +1191,14 @@ function patchModel(req, res, m) {
 // What the installer and the admin's apply command read: one entry per model in the pack.json mod format.
 function modelPackEntries(req, res, url) {
   const status = url.searchParams.get('status') || 'uploaded';
-  const host = req.headers.host || 'localhost';
+  const base = siteBase(req);
   const list = models
     .filter((m) => status === 'all' || (status === 'proposed' ? m.status !== 'uploaded' || m.uploadedFile !== m.file : m.status === 'uploaded'))
     .filter((m) => fs.existsSync(path.join(modelDir(m), m.file)))
     .map((m) => ({
       id: m.id, name: m.name, match: `${modIdOf(m.namespace)}-*.jar`, file: m.file, sha256: m.sha256,
-      url: `http://${host}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
-      page: `http://${host}/#models`, status: m.status, pending: m.status === 'uploaded' && m.uploadedFile !== m.file,
+      url: `${base}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
+      page: `${base}/#models`, status: m.status, pending: m.status === 'uploaded' && m.uploadedFile !== m.file,
     }));
   sendJson(res, 200, list);
 }
@@ -1198,8 +1233,7 @@ function autoReleasePack(req, changedModels) {
   const dir = path.join(parent, folder);
   fs.cpSync(baseDir, dir, { recursive: true });
 
-  const host = req.headers.host || 'localhost';
-  const feed = `http://${host}/api/models/pack-entries?status=uploaded`;
+  const feed = `${siteBase(req)}/api/models/pack-entries?status=uploaded`;
   pack.packVersion = version;
   pack.modListUrls = [...(Array.isArray(pack.modListUrls) ? pack.modListUrls : []).filter((u) => typeof u === 'string' && !/FRIEND-PC|\/api\/models\/pack-entries/.test(u)), feed];
   fs.mkdirSync(path.join(dir, 'mods'), { recursive: true });
@@ -1276,11 +1310,250 @@ function modelTexture(req, res, m, fileRaw) {
   fs.createReadStream(full).pipe(res);
 }
 
+
+// ---------- accounts, sessions, install tracking, deploy reports ----------
+// AUTH=on (default in hosted mode): every API call needs a signed-in user. Passwords are scrypt-hashed. A session is
+// a signed cookie; the installer and the deploy command use a bearer token instead (each user has one).
+
+let users = loadList(USERS_FILE);
+let nextUserId = users.reduce((max, u) => Math.max(max, u.id), 0) + 1;
+const saveUsers = () => saveList(USERS_FILE, users);
+let deploys = loadList(DEPLOYS_FILE); // reports from the Minecraft server's deploy command, newest last
+const saveDeploys = () => saveList(DEPLOYS_FILE, deploys);
+
+let SECRET = process.env.SESSION_SECRET || '';
+if (!SECRET) {
+  try { SECRET = fs.readFileSync(SECRET_FILE, 'utf8').trim(); } catch { /* first start */ }
+  if (!SECRET) { SECRET = crypto.randomBytes(32).toString('hex'); fs.writeFileSync(SECRET_FILE, SECRET, { mode: 0o600 }); }
+}
+const SESSION_DAYS = 60;
+const loginAttempts = new Map(); // ip -> { count, until }
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return { salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') };
+}
+function checkPassword(user, password) {
+  const { hash } = hashPassword(password, user.salt);
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(user.hash, 'hex'));
+}
+const sign = (data) => crypto.createHmac('sha256', SECRET).update(data).digest('base64url');
+
+function sessionCookie(user) {
+  const data = `${user.id}.${Date.now() + SESSION_DAYS * 864e5}`;
+  const secure = PUBLIC_URL.startsWith('https://') ? '; Secure' : '';
+  return `sid=${data}.${sign(data)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${secure}`;
+}
+
+function publicUser(u) {
+  return { id: u.id, name: u.name, role: u.role, created: u.created, lastSeen: u.lastSeen, install: u.install || null };
+}
+
+// Sets req.user from the session cookie, or from "Authorization: Bearer <install token>" / ?token= (installer, feed links).
+function authenticate(req, url) {
+  req.user = null;
+  const m = /(?:^|;\s*)sid=([^;]+)/.exec(req.headers.cookie || '');
+  if (m) {
+    const [id, exp, sig] = m[1].split('.');
+    if (id && exp && sig && sign(`${id}.${exp}`) === sig && Number(exp) > Date.now()) {
+      req.user = users.find((u) => u.id === Number(id)) || null;
+    }
+  }
+  if (!req.user) {
+    const bearer = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
+    const token = (bearer && bearer[1]) || url.searchParams.get('token');
+    if (token) req.user = users.find((u) => u.token === token) || null;
+  }
+  if (req.user) req.user.lastSeen = Date.now(); // saved with the next change, not worth a write per request
+}
+
+function postRegister(req, res) {
+  readJson(req, (body) => {
+    if (!body) return sendJson(res, 400, { error: 'Bad request' });
+    const name = cleanText(body.name, 24);
+    const password = String(body.password || '');
+    if (!/^[\w .-]{2,24}$/.test(name)) return sendJson(res, 400, { error: 'Name: 2 to 24 letters, numbers, spaces, . _ -' });
+    if (password.length < 6) return sendJson(res, 400, { error: 'Password: at least 6 characters' });
+    if (INVITE_CODE && String(body.invite || '') !== INVITE_CODE) return sendJson(res, 403, { error: 'Wrong invite code' });
+    if (users.some((u) => u.name.toLowerCase() === name.toLowerCase())) return sendJson(res, 409, { error: 'That name is taken' });
+    const user = {
+      id: nextUserId++, name, role: users.length ? 'member' : 'admin', ...hashPassword(password),
+      token: crypto.randomBytes(24).toString('base64url'), created: Date.now(), lastSeen: Date.now(), install: null,
+    };
+    users.push(user);
+    saveUsers();
+    log(req, `account created  ${name} (${user.role})`);
+    res.setHeader('Set-Cookie', sessionCookie(user));
+    sendJson(res, 201, { user: publicUser(user) });
+  });
+}
+
+function postLogin(req, res) {
+  const ip = clientIp(req);
+  const a = loginAttempts.get(ip);
+  if (a && a.count >= 10 && Date.now() < a.until) return sendJson(res, 429, { error: 'Too many attempts, wait 10 minutes' });
+  readJson(req, (body) => {
+    const name = cleanText(body && body.name, 24);
+    const user = users.find((u) => u.name.toLowerCase() === name.toLowerCase());
+    if (!user || !checkPassword(user, String((body && body.password) || ''))) {
+      const next = a && Date.now() < a.until ? a : { count: 0, until: 0 };
+      next.count++;
+      next.until = Date.now() + 10 * 60 * 1000;
+      loginAttempts.set(ip, next);
+      log(req, `login FAILED     ${name}`);
+      return sendJson(res, 401, { error: 'Wrong name or password' });
+    }
+    loginAttempts.delete(ip);
+    user.lastSeen = Date.now();
+    saveUsers();
+    log(req, `login            ${user.name}`);
+    res.setHeader('Set-Cookie', sessionCookie(user));
+    sendJson(res, 200, { user: publicUser(user) });
+  });
+}
+
+function getMe(req, res) {
+  const current = currentRelease();
+  sendJson(res, 200, {
+    auth: AUTH, mode: MODE, user: req.user ? { ...publicUser(req.user), token: req.user.token } : null, admin: isAdmin(req),
+    inviteNeeded: !!INVITE_CODE, usersExist: users.length > 0, current: current ? current.version : null,
+    server: deploys.length ? deploys[deploys.length - 1] : null,
+  });
+}
+
+function patchUser(req, res, target) {
+  readJson(req, (body) => {
+    if (!body) return sendJson(res, 400, { error: 'Bad request' });
+    const self = req.user && req.user.id === target.id;
+    if ('password' in body) {
+      if (!self && !isAdmin(req)) return sendJson(res, 403, { error: 'Not allowed' });
+      if (String(body.password).length < 6) return sendJson(res, 400, { error: 'Password: at least 6 characters' });
+      Object.assign(target, hashPassword(String(body.password)));
+    }
+    if ('role' in body) {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can change roles' });
+      if (self && body.role !== 'admin') return sendJson(res, 400, { error: 'You cannot remove your own admin role' });
+      target.role = body.role === 'admin' ? 'admin' : 'member';
+    }
+    if (body.newToken) {
+      if (!self && !isAdmin(req)) return sendJson(res, 403, { error: 'Not allowed' });
+      target.token = crypto.randomBytes(24).toString('base64url');
+    }
+    saveUsers();
+    log(req, `account updated  ${target.name}`);
+    sendJson(res, 200, { user: publicUser(target) });
+  });
+}
+
+// The installer posts this at the end of every run (token identifies the player; the deploy command adds target=server).
+function postInstallReport(req, res) {
+  readJson(req, (body) => {
+    if (!body) return sendJson(res, 400, { error: 'Bad request' });
+    const report = {
+      packVersion: cleanText(body.packVersion, 40), ok: !!body.ok, time: Date.now(),
+      minecraft: cleanText(body.minecraft, 20), problems: Array.isArray(body.problems) ? body.problems.map((p) => cleanText(p, 300)).slice(0, 20) : [],
+      mods: Array.isArray(body.mods) ? body.mods.map((m) => cleanText(m, 120)).slice(0, 200) : [],
+      machine: cleanText(body.machine, 60),
+    };
+    if (body.target === 'server') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: 'Server deploy reports need the admin token' });
+      report.by = req.user ? req.user.name : 'deploy command';
+      deploys.push(report);
+      if (deploys.length > 100) deploys = deploys.slice(-100);
+      saveDeploys();
+      log(req, `server deploy    pack ${report.packVersion} (${report.mods.length} mods, ${report.ok ? 'ok' : 'with problems'})`);
+      return sendJson(res, 201, { ok: true });
+    }
+    if (!req.user) return sendJson(res, 401, { error: 'Unknown install token. Download the installer again from the site while signed in.' });
+    req.user.install = report;
+    saveUsers();
+    log(req, `install report   ${req.user.name}: pack ${report.packVersion} (${report.ok ? 'ok' : 'with problems'})`);
+    sendJson(res, 201, { ok: true });
+  }, 64 * 1024);
+}
+
+function currentRelease() {
+  const ready = releases.filter((r) => r.status === 'ready').sort((a, b) => b.added - a.added);
+  return ready.find((r) => r.tags.includes('Recent')) || ready[0] || null;
+}
+
+// Installer download for a signed-in user: the zip's pack.json gets the report address and the user's token, so the
+// installer can fetch the model feed and report back. Without accounts it is the plain folder zip.
+function downloadRelease(req, res, release) {
+  const segs = [INSTALLER_DIR, release.folder];
+  const folder = sharedPath(segs);
+  if (!folder || !folder.stat.isDirectory()) return sendJson(res, 404, { error: 'Version not found' });
+  const entries = zipEntries(folder.full, folder.name);
+  const packEntry = entries.find((e) => !e.dir && e.zipPath === folder.name + '/pack.json');
+  if (packEntry && req.user) {
+    const pack = parseJsonSafe(fs.readFileSync(packEntry.full));
+    if (pack && typeof pack === 'object') {
+      pack.report = { url: `${siteBase(req)}/api/installs`, token: req.user.token, user: req.user.name };
+      packEntry.data = Buffer.from(JSON.stringify(pack, null, 2) + '\n');
+      packEntry.size = packEntry.data.length;
+    }
+  }
+  return downloadZip(req, res, folder, entries);
+}
+
+// Everything under DATA_DIR as one zip: the shared files plus the json files. Restore with  node server.js --import
+function exportEntries() {
+  const entries = zipEntries(SHARE_DIR, 'shared');
+  for (const f of DATA_FILES) {
+    const full = path.join(DATA_DIR, f);
+    if (!fs.existsSync(full)) continue;
+    const st = fs.statSync(full);
+    entries.push({ dir: false, full, zipPath: f, size: st.size, mtime: st.mtimeMs });
+  }
+  return entries;
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
 
   try {
+    authenticate(req, url);
+    // Account routes work without a session; everything else needs one when AUTH is on.
+    if (p === '/api/me' && req.method === 'GET') return getMe(req, res);
+    if (p === '/api/register' && req.method === 'POST') return postRegister(req, res);
+    if (p === '/api/login' && req.method === 'POST') return postLogin(req, res);
+    if (p === '/api/logout' && req.method === 'POST') {
+      res.setHeader('Set-Cookie', 'sid=; Path=/; HttpOnly; Max-Age=0');
+      return sendJson(res, 200, { ok: true });
+    }
+    const isPage = (req.method === 'GET' || req.method === 'HEAD') && (p === '/' || p === '/model-viewer.js');
+    if (AUTH && !req.user && !isPage && !(ADMIN_TOKEN && req.headers['x-admin-token'] === ADMIN_TOKEN)) {
+      return sendJson(res, 401, { error: 'Sign in first', login: true });
+    }
+
+    if (p === '/api/installs' && req.method === 'POST') return postInstallReport(req, res);
+    if (p === '/api/users' && req.method === 'GET') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can list accounts' });
+      return sendJson(res, 200, { users: users.map(publicUser), current: (currentRelease() || {}).version || null });
+    }
+    if (p.startsWith('/api/users/')) {
+      const target = users.find((u) => `/api/users/${u.id}` === p);
+      if (!target) return sendJson(res, 404, { error: 'Account not found' });
+      if (req.method === 'PATCH') return patchUser(req, res, target);
+      if (req.method === 'DELETE') {
+        if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can remove accounts' });
+        if (req.user && req.user.id === target.id) return sendJson(res, 400, { error: 'You cannot remove yourself' });
+        users = users.filter((u) => u !== target);
+        saveUsers();
+        log(req, `account removed  ${target.name}`);
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+    if (p === '/api/deploys' && req.method === 'GET') return sendJson(res, 200, { deploys: deploys.slice(-20).reverse() });
+    if (p === '/api/export' && (req.method === 'GET' || req.method === 'HEAD')) {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can export' });
+      return downloadZip(req, res, { full: DATA_DIR, name: 'lan-file-share-data', segs: ['export'] }, exportEntries()).catch((err) => {
+        console.error(err);
+        if (!res.headersSent) sendJson(res, 500, { error: 'Export failed' });
+        else res.destroy();
+      });
+    }
+
     if ((req.method === 'GET' || req.method === 'HEAD') && p === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return req.method === 'HEAD' ? res.end() : fs.createReadStream(INDEX_FILE).pipe(res);
@@ -1298,14 +1571,14 @@ const server = http.createServer((req, res) => {
 
     // Mods and POIs: everyone can add and edit, only the host PC can delete (same as files).
     if (req.method === 'GET' && p === '/api/title') return getTitle(req, res, url);
-    if (req.method === 'GET' && p === '/api/mods') return sendJson(res, 200, { mods, canDelete: isLocal(req) });
+    if (req.method === 'GET' && p === '/api/mods') return sendJson(res, 200, { mods, canDelete: isAdmin(req) });
     if (req.method === 'POST' && p === '/api/mods') return postMod(req, res);
     if (p.startsWith('/api/mods/')) {
       const mod = mods.find((m) => `/api/mods/${m.id}` === p);
       if (!mod) return sendJson(res, 404, { error: 'Mod not found' });
       if (req.method === 'PATCH') return patchMod(req, res, mod);
       if (req.method === 'DELETE') {
-        if (!isLocal(req)) return sendJson(res, 403, { error: 'Only the host PC can remove mods' });
+        if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can remove mods' });
         mods = mods.filter((m) => m !== mod);
         saveMods();
         log(req, `mod removed      ${mod.name}`);
@@ -1314,6 +1587,16 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === 'GET' && p === '/api/releases') return listReleases(req, res);
+    if ((req.method === 'GET' || req.method === 'HEAD') && (p === '/api/releases/current/download' || /^\/api\/releases\/\d+\/download$/.test(p))) {
+      const idPart = p.split('/')[3];
+      const release = idPart === 'current' ? currentRelease() : releases.find((r) => String(r.id) === idPart);
+      if (!release || release.status !== 'ready') return sendJson(res, 404, { error: 'Version not found' });
+      return downloadRelease(req, res, release).catch((err) => {
+        console.error(err);
+        if (!res.headersSent) sendJson(res, 500, { error: 'Could not zip that version' });
+        else res.destroy();
+      });
+    }
     if (req.method === 'POST' && p === '/api/releases') return postRelease(req, res);
     if (p.startsWith('/api/releases/')) {
       const [idPart, action] = p.slice('/api/releases/'.length).split('/');
@@ -1337,7 +1620,7 @@ const server = http.createServer((req, res) => {
       if (req.method === 'PUT' && action === 'skins') return uploadSkin(req, res, m, url);
       if (req.method === 'PATCH' && !action) return patchModel(req, res, m);
       if (req.method === 'DELETE' && !action) {
-        if (!isLocal(req)) return sendJson(res, 403, { error: 'Only the host PC can delete models' });
+        if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can delete models' });
         fs.rmSync(modelDir(m), { recursive: true, force: true });
         touched(modelDir(m), false);
         models = models.filter((x) => x !== m);
@@ -1347,14 +1630,14 @@ const server = http.createServer((req, res) => {
       }
     }
 
-    if (req.method === 'GET' && p === '/api/pois') return sendJson(res, 200, { pois, types: POI_TYPES, canDelete: isLocal(req) });
+    if (req.method === 'GET' && p === '/api/pois') return sendJson(res, 200, { pois, types: POI_TYPES, canDelete: isAdmin(req) });
     if (req.method === 'POST' && p === '/api/pois') return postPoi(req, res);
     if (p.startsWith('/api/pois/')) {
       const poi = pois.find((x) => `/api/pois/${x.id}` === p);
       if (!poi) return sendJson(res, 404, { error: 'Place not found' });
       if (req.method === 'PATCH') return patchPoi(req, res, poi);
       if (req.method === 'DELETE') {
-        if (!isLocal(req)) return sendJson(res, 403, { error: 'Only the host PC can delete places' });
+        if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can delete places' });
         pois = pois.filter((x) => x !== poi);
         savePois();
         log(req, `poi deleted      ${poi.title}`);
@@ -1377,7 +1660,7 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === 'DELETE' && p.startsWith('/api/files/')) {
-      if (!isLocal(req)) return sendJson(res, 403, { error: 'Only the host PC can delete files' });
+      if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can delete files' });
       const item = sharedPath(parseRel(p.slice('/api/files/'.length), true));
       if (!item || !item.segs.length) return sendJson(res, 404, { error: 'File not found' });
       fs.rmSync(item.full, { recursive: true });
@@ -1404,8 +1687,89 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('\n  LAN File Share is running.\n');
+// ---------- command line: export / import the data folder ----------
+async function runCli() {
+  if (CLI.cmd === 'export') {
+    const out = path.resolve(CLI.file || `lan-file-share-${new Date().toISOString().slice(0, 10)}.zip`);
+    const ws = fs.createWriteStream(out);
+    // downloadZip writes to a response; a file stream with the few methods it uses works the same.
+    const fakeRes = Object.assign(ws, { writeHead() {}, headersSent: false });
+    await downloadZip({ method: 'GET', socket: {}, headers: {} }, fakeRes, { full: DATA_DIR, name: 'data', segs: ['export'] }, exportEntries());
+    await new Promise((r) => ws.on('finish', r));
+    console.log(`Exported ${DATA_DIR} to ${out} (${formatSize(fs.statSync(out).size)})`);
+    return;
+  }
+  if (CLI.cmd === 'import') {
+    if (!CLI.file || !fs.existsSync(CLI.file)) throw new Error('Usage: node server.js --import <backup.zip>');
+    const fd = fs.openSync(CLI.file, 'r');
+    const size = fs.fstatSync(fd).size;
+    const tail = Buffer.alloc(Math.min(size, 70000));
+    fs.readSync(fd, tail, 0, tail.length, size - tail.length);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('Not a zip file');
+    let count = tail.readUInt16LE(eocd + 10);
+    let cdOffset = tail.readUInt32LE(eocd + 16);
+    let cdSize = tail.readUInt32LE(eocd + 12);
+    if (cdOffset === MAX32) { // zip64: the locator sits just before the end record
+      const loc = eocd - 20;
+      const z64 = Number(tail.readBigUInt64LE(loc + 8)) - (size - tail.length);
+      const rec = Buffer.alloc(56);
+      if (z64 >= 0 && z64 + 56 <= tail.length) tail.copy(rec, 0, z64, z64 + 56); else fs.readSync(fd, rec, 0, 56, Number(tail.readBigUInt64LE(loc + 8)));
+      count = Number(rec.readBigUInt64LE(32)); cdSize = Number(rec.readBigUInt64LE(40)); cdOffset = Number(rec.readBigUInt64LE(48));
+    }
+    const cd = Buffer.alloc(cdSize);
+    fs.readSync(fd, cd, 0, cdSize, cdOffset);
+    let p = 0;
+    let n = 0;
+    for (let i = 0; i < count; i++) {
+      const method = cd.readUInt16LE(p + 10);
+      let csize = cd.readUInt32LE(p + 20);
+      let usize = cd.readUInt32LE(p + 24);
+      const nameLen = cd.readUInt16LE(p + 28), extraLen = cd.readUInt16LE(p + 30), commentLen = cd.readUInt16LE(p + 32);
+      let localOff = cd.readUInt32LE(p + 42);
+      let name = cd.toString('utf8', p + 46, p + 46 + nameLen).replace(/\\/g, '/');
+      const extra = cd.subarray(p + 46 + nameLen, p + 46 + nameLen + extraLen);
+      for (let q = 0; q + 4 <= extra.length;) { // zip64 sizes/offset
+        const id = extra.readUInt16LE(q), len = extra.readUInt16LE(q + 2);
+        if (id === 1) {
+          let r = q + 4;
+          if (usize === MAX32) { usize = Number(extra.readBigUInt64LE(r)); r += 8; }
+          if (csize === MAX32) { csize = Number(extra.readBigUInt64LE(r)); r += 8; }
+          if (localOff === MAX32) { localOff = Number(extra.readBigUInt64LE(r)); }
+        }
+        q += 4 + len;
+      }
+      p += 46 + nameLen + extraLen + commentLen;
+      if (name.includes('..') || name.startsWith('/')) continue;
+      // Exported zips have "shared/..." and the json files at the top; a zip of the whole data folder works too.
+      name = name.replace(/^(data|lan-file-share-data)\//, '');
+      const target = path.join(DATA_DIR, name);
+      if (name.endsWith('/')) { fs.mkdirSync(target, { recursive: true }); continue; }
+      const head = Buffer.alloc(30);
+      fs.readSync(fd, head, 0, 30, localOff);
+      const start = localOff + 30 + head.readUInt16LE(26) + head.readUInt16LE(28);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      await new Promise((resolve, reject) => {
+        const src = csize ? fs.createReadStream(CLI.file, { start, end: start + csize - 1, highWaterMark: CHUNK }) : null;
+        const dst = fs.createWriteStream(target);
+        if (!src) return dst.end(resolve);
+        const chain = method === 8 ? [src, zlib.createInflateRaw(), dst] : [src, dst];
+        pipeline(...chain, (err) => (err ? reject(err) : resolve()));
+      });
+      n++;
+    }
+    fs.closeSync(fd);
+    console.log(`Imported ${n} files into ${DATA_DIR}`);
+    return;
+  }
+  throw new Error(`Unknown option --${CLI.cmd}. Use --export [file.zip] or --import <file.zip>`);
+}
+
+if (CLI) {
+  runCli().then(() => process.exit(0), (err) => { console.error(err.message); process.exit(1); });
+} else server.listen(PORT, BIND, () => {
+  console.log(`\n  LAN File Share is running (${MODE} mode, accounts ${AUTH ? 'on' : 'off'}).\n`);
   console.log('  Tell your friends to open one of these in their browser:\n');
   for (const [ifname, addrs] of Object.entries(os.networkInterfaces())) {
     for (const a of addrs || []) {
@@ -1419,5 +1783,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  Places are saved in: ${POIS_FILE} (${pois.length} places)`);
   console.log(`  Installer versions:  ${RELEASES_FILE} (${releases.length} versions)`);
   console.log(`  Models:              ${MODELS_FILE} (${models.length} models)`);
+  if (AUTH) console.log(`  Accounts:            ${USERS_FILE} (${users.length} accounts${INVITE_CODE ? ', invite code set' : ', OPEN REGISTRATION, set INVITE_CODE'})`);
+  if (MODE === 'hosted' && !ADMIN_TOKEN) console.log('  WARNING: ADMIN_TOKEN is not set, the deploy command cannot talk to this site.');
   console.log('  Close this window to stop the server.\n');
 });

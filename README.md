@@ -23,3 +23,45 @@ Such a jar goes into the `mods` folder on the Minecraft server and on every play
   it in Downloads) and run it. It copies the jars into `mods\`, replacing older builds. Then restart the server.
 - **Players**: the mods installer reads `GET /api/models/pack-entries?status=uploaded` (the address is shown on the Models
   tab) when its `pack.json` lists it under `modListUrls`, so uploaded models install and update without a new pack release.
+
+## Hosting on a real server
+
+Everything is switched by a `.env` file next to `server.js` (see `.env.example`). Without one the site runs as the LAN
+party share it always was. With `MODE=hosted`:
+
+- **Accounts.** Everyone signs in. Registration needs `INVITE_CODE`; the first account becomes the admin. Admins
+  delete things, manage accounts and export data (what the host PC could do on the LAN).
+- **Install tracking.** The installer download for a signed-in player carries a personal token in its `pack.json`.
+  The installer reports the version it installed; the banner tells each player whether they are current, and the
+  Accounts panel shows the admin who is behind.
+- **Server deploys.** `tools/deploy-server.cmd` in the Minecraft server folder pulls the current pack with
+  `ADMIN_TOKEN`, installs mods and uploaded models into the server, and reports it. The banner shows what the server runs.
+- **Model feed and downloads** need a token; the installer sends the player's one, the deploy command the admin one.
+
+### Setup (Linux, Node 20.12 or newer)
+
+```
+sudo useradd -r -m -d /opt/lan-file-share lanshare
+sudo -u lanshare git clone https://github.com/ivaki97-star/lan-file-share /opt/lan-file-share
+cd /opt/lan-file-share && sudo -u lanshare cp .env.example .env && sudo -u lanshare nano .env
+sudo mkdir -p /var/lib/lan-file-share && sudo chown lanshare /var/lib/lan-file-share
+sudo cp deploy/lan-file-share.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now lan-file-share
+```
+
+Put Caddy (or nginx) in front for HTTPS: `deploy/Caddyfile` is a complete example. `PUBLIC_URL` must be the https
+address, it is written into the installer. Open only ports 80 and 443; `BIND=127.0.0.1` keeps Node off the internet.
+
+### Moving the data from the LAN PC
+
+On the PC that hosted the LAN share: `node server.js --export backup.zip` (or the admin's "Export data" link).
+On the server, with the service stopped: `sudo -u lanshare DATA_DIR=/var/lib/lan-file-share node server.js --import backup.zip`.
+That restores the shared files, chat, mod lists, places, installer versions, models and accounts.
+
+### Updating
+
+`cd /opt/lan-file-share && sudo -u lanshare git pull && sudo systemctl restart lan-file-share`
+
+### Minecraft server side
+
+Copy `tools/deploy-server.cmd` into the server folder, open it in Notepad and set `SiteUrl` and `AdminToken`.
+Stop the server, run it, start the server. Launch the server with `fabric-server-launch.jar` (never `server.jar`).

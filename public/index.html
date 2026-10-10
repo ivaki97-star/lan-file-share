@@ -209,6 +209,19 @@
   .installer-link a { font-size: 11px; color: #3d4350; cursor: default; text-decoration: none; }
   .installer-link a:hover { color: #5d6575; }
 
+  .who { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .who b { color: var(--text); }
+  .who a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .who a:hover { text-decoration: underline; }
+  .login-tabs { display: flex; gap: 4px; }
+  .login-tabs button { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .login-tabs button.on { color: var(--text); border-color: var(--accent); }
+  .mine { font-size: 12px; margin-left: 8px; }
+  .mine.ok { color: var(--ok); }
+  .mine.old { color: #f0b54a; }
+  .mine.none { color: var(--muted); }
+  .users { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .srv { font-size: 12px; color: var(--muted); }
   .modal-bg { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .6); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
   .modal { background: var(--bg); border: 1px solid var(--border); border-radius: 14px; width: 100%; max-width: 760px; padding: 18px; display: grid; gap: 14px; }
   .modal-head { display: flex; justify-content: space-between; align-items: center; }
@@ -289,6 +302,35 @@
   </div>
 </div>
 
+<div class="modal-bg" id="login-modal" hidden>
+  <div class="modal" style="max-width: 420px">
+    <div class="modal-head">
+      <h2>🔐 <span id="login-title">Sign in</span></h2>
+      <span class="login-tabs"><button type="button" class="on" id="login-tab-in">Sign in</button><button type="button" id="login-tab-up">Register</button></span>
+    </div>
+    <form class="mod-form" id="login-form" autocomplete="on" style="grid-template-columns: 1fr">
+      <label>Name <input class="text-in" id="login-name" maxlength="24" autocomplete="username"></label>
+      <label>Password <input class="text-in" id="login-pass" type="password" autocomplete="current-password"></label>
+      <label id="login-invite-row" hidden>Invite code <input class="text-in" id="login-invite" autocomplete="off"></label>
+      <div class="mod-form-bottom">
+        <span class="mod-status" id="login-status"></span>
+        <button id="login-submit">Sign in</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal-bg" id="users-modal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>👥 Accounts</h2>
+      <button class="ghost" id="users-close" type="button">Close</button>
+    </div>
+    <p class="model-help" id="users-help"></p>
+    <div class="users" id="users-list"></div>
+  </div>
+</div>
+
 <div class="modal-bg" id="installer-modal" hidden>
   <div class="modal">
     <div class="modal-head">
@@ -327,6 +369,7 @@
 <div class="wrap">
   <header>
     <h1>LAN <span>File Share</span></h1>
+    <div class="who" id="who"></div>
     <div class="free" id="free"></div>
   </header>
 
@@ -472,6 +515,124 @@
 <script src="/model-viewer.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
+
+// ---------- session ----------
+// With accounts on (hosted mode) every API call needs a signed-in user: a 401 anywhere opens the sign-in box.
+let me = { auth: false, user: null, admin: false, inviteNeeded: false, current: null, server: null };
+const rawFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  const r = await rawFetch(input, init);
+  if (r.status === 401 && me.auth && $('login-modal').hidden) showLogin('in');
+  return r;
+};
+let loginMode = 'in';
+function showLogin(mode) {
+  loginMode = mode;
+  $('login-modal').hidden = false;
+  $('login-tab-in').classList.toggle('on', mode === 'in');
+  $('login-tab-up').classList.toggle('on', mode === 'up');
+  $('login-title').textContent = mode === 'in' ? 'Sign in' : 'Create your account';
+  $('login-submit').textContent = mode === 'in' ? 'Sign in' : 'Register';
+  $('login-invite-row').hidden = mode === 'in' || !me.inviteNeeded;
+  $('login-pass').autocomplete = mode === 'in' ? 'current-password' : 'new-password';
+  $('login-status').textContent = mode === 'up' && !me.usersExist ? 'The first account becomes the admin.' : '';
+  $('login-name').focus();
+}
+$('login-tab-in').onclick = () => showLogin('in');
+$('login-tab-up').onclick = () => showLogin('up');
+$('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('login-status');
+  status.className = 'mod-status';
+  const body = { name: $('login-name').value.trim(), password: $('login-pass').value, invite: $('login-invite').value.trim() };
+  const res = await rawFetch(loginMode === 'in' ? '/api/login' : '/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { status.className = 'mod-status warn'; status.textContent = data.error || 'Failed'; return; }
+  $('login-modal').hidden = true;
+  $('login-pass').value = '';
+  await loadMe();
+  reloadAll();
+});
+
+async function loadMe() {
+  try {
+    const res = await rawFetch('/api/me', { cache: 'no-store' });
+    me = await res.json();
+  } catch { return; }
+  renderWho();
+  if (me.auth && !me.user) showLogin(me.usersExist ? 'in' : 'up');
+  // Signed in: the chat name is the account name.
+  if (me.user) { $('nick').value = me.user.name; $('nick').disabled = true; } else $('nick').disabled = false;
+}
+
+function renderWho() {
+  const who = $('who');
+  who.replaceChildren();
+  if (!me.auth) return;
+  if (!me.user) { who.append(el('a', { textContent: 'Sign in', onclick: () => showLogin('in') })); return; }
+  who.append('Signed in as ', el('b', { textContent: me.user.name }));
+  if (me.admin) {
+    who.append(el('a', { textContent: 'Accounts', onclick: openUsers }), el('a', { textContent: 'Export data', href: '/api/export', download: 'lan-file-share-data.zip', title: 'Everything: files, chat, mods, places, models, accounts. Restore with: node server.js --import' }));
+  }
+  who.append(el('a', { textContent: 'Change password', onclick: async () => {
+    const p = prompt('New password (at least 6 characters):');
+    if (p === null) return;
+    const r = await fetch('/api/users/' + me.user.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: p }) });
+    alert(r.ok ? 'Password changed.' : (await r.json().catch(() => ({}))).error || 'Failed');
+  } }), el('a', { textContent: 'Sign out', onclick: async () => { await rawFetch('/api/logout', { method: 'POST' }); location.reload(); } }));
+}
+
+// Everything the page polls, reloaded after a sign-in.
+function reloadAll() {
+  lastJson = lastModsJson = lastPoisJson = lastReleasesJson = lastModelsJson = '';
+  refresh(); refreshMods(); refreshPois(); refreshReleases(); refreshModels(); pollChat();
+}
+
+// ---------- accounts (admin) ----------
+async function openUsers() {
+  $('users-modal').hidden = false;
+  const res = await fetch('/api/users', { cache: 'no-store' });
+  const data = await res.json().catch(() => ({}));
+  const box = $('users-list');
+  box.replaceChildren();
+  if (!res.ok) { box.append(el('div', { className: 'empty', textContent: data.error || 'Failed' })); return; }
+  $('users-help').textContent = `${data.users.length} account${data.users.length === 1 ? '' : 's'}. "Installed" is what each person's installer reported last; current version is ${data.current ? vLabel(data.current) : 'none yet'}.` + (me.inviteNeeded ? ' Registration needs the invite code from the server\'s .env.' : ' Registration is open: set INVITE_CODE in .env to close it.');
+  for (const u of data.users.sort((a, b) => a.name.localeCompare(b.name))) {
+    const inst = u.install;
+    let instText = 'nothing reported yet', instClass = 'none';
+    if (inst) {
+      const cur = data.current && inst.packVersion === data.current;
+      instText = `${vLabel(inst.packVersion || '?')} ${inst.ok ? '' : '(with problems) '}· ${fmtDate(inst.time)}` + (cur ? ' · current' : data.current ? ' · OUTDATED' : '');
+      instClass = cur ? 'ok' : 'old';
+    }
+    const actions = el('div', { className: 'actions' },
+      el('button', { className: 'ghost', type: 'button', textContent: u.role === 'admin' ? 'Make member' : 'Make admin', onclick: async () => {
+        const r = await fetch('/api/users/' + u.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: u.role === 'admin' ? 'member' : 'admin' }) });
+        if (!r.ok) alert((await r.json().catch(() => ({}))).error || 'Failed');
+        openUsers();
+      } }),
+      el('button', { className: 'ghost', type: 'button', textContent: 'Reset password', onclick: async () => {
+        const p = prompt(`New password for ${u.name}:`);
+        if (p === null) return;
+        const r = await fetch('/api/users/' + u.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: p }) });
+        alert(r.ok ? 'Password changed.' : (await r.json().catch(() => ({}))).error || 'Failed');
+      } }));
+    if (u.id !== me.user.id) actions.append(el('button', { className: 'ghost danger', type: 'button', textContent: 'Remove', onclick: async () => {
+      if (!confirm(`Remove the account "${u.name}"?`)) return;
+      const r = await fetch('/api/users/' + u.id, { method: 'DELETE' });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).error || 'Failed');
+      openUsers();
+    } }));
+    box.append(el('div', { className: 'file' },
+      el('div', { className: 'file-main' },
+        el('div', { className: 'file-name' }, el('b', { textContent: u.name }), ` · ${u.role}`, el('span', { className: 'mine ' + instClass, textContent: 'installed: ' + instText })),
+        el('div', { className: 'file-meta', textContent: `joined ${fmtDate(u.created)} · last seen ${u.lastSeen ? fmtDate(u.lastSeen) : 'never'}` })),
+      actions));
+  }
+}
+$('users-close').onclick = () => { $('users-modal').hidden = true; };
+$('users-modal').addEventListener('click', (e) => { if (e.target === $('users-modal')) $('users-modal').hidden = true; });
+
 let files = [];
 let canDelete = false;
 let lastJson = '';
@@ -599,7 +760,7 @@ async function del(segs, type) {
 }
 
 $('search').addEventListener('input', render);
-refresh();
+loadMe().then(() => { refresh(); });
 setInterval(refresh, 3000);
 
 // ---------- tabs ----------
@@ -1232,7 +1393,7 @@ let lastMsgId = 0;
 let lastMsg = null;
 let polling = false;
 
-try { $('nick').value = localStorage.getItem('nick') || ''; } catch {}
+try { if (!me.user) $('nick').value = localStorage.getItem('nick') || ''; } catch {}
 $('nick').addEventListener('input', () => {
   $('nick').classList.remove('need');
   try { localStorage.setItem('nick', $('nick').value.trim()); } catch {}
@@ -1581,6 +1742,12 @@ function renderBanner() {
   if (main.by) sub.push(`by ${main.by}`);
   sub.push(`${main.count} file${main.count === 1 ? '' : 's'}, ${fmtSize(main.size)}`);
   if (main.note) sub.push(main.note.split('\n')[0]);
+  if (me.user) {
+    const inst = me.user.install;
+    const cls = !inst ? 'none' : inst.packVersion === main.version ? 'ok' : 'old';
+    title.append(el('span', { className: 'mine ' + cls, textContent: !inst ? 'you: not installed yet' : inst.packVersion === main.version ? 'you: up to date' : `you: ${vLabel(inst.packVersion)}, update!` }));
+  }
+  if (me.server) sub.push(`server runs ${vLabel(me.server.packVersion || '?')} (${fmtDate(me.server.time)})`);
   $('banner-sub').textContent = sub.join(' · ');
   $('banner-sub').title = main.note || '';
 
@@ -1744,6 +1911,7 @@ new ResizeObserver(() => document.documentElement.style.setProperty('--banner-h'
 
 refreshReleases();
 setInterval(refreshReleases, 5000);
+setInterval(async () => { if (!me.auth || !me.user) return; try { const r = await rawFetch('/api/me', { cache: 'no-store' }); const m = await r.json(); if (JSON.stringify(m) !== JSON.stringify(me)) { me = m; renderWho(); lastReleasesJson = ''; refreshReleases(); } } catch {} }, 15000);
 
 // Reopen the tab this person had open last time.
 let savedTab = 'files';

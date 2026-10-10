@@ -6,4 +6,9 @@ mods.json
 pois.json
 releases.json
 models.json
+users.json
+deploys.json
+secret.key
+.env
+*.zip
 *.tmp
