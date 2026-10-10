@@ -233,7 +233,16 @@
   .model { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
   .model.uploaded { border-color: #245a40; }
   .model.pending { border-color: #6b4f1a; }
+  .model-view { position: relative; height: 230px; border: 1px solid var(--border); border-radius: 8px; background: radial-gradient(ellipse at 50% 80%, #232838, #12151c 70%); overflow: hidden; }
+  .model-view canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  .model-view canvas:active { cursor: grabbing; }
+  .model-anims { position: absolute; left: 8px; bottom: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .model-anims button { padding: 2px 9px; font-size: 12px; background: rgba(23, 26, 33, .85); color: var(--muted); border: 1px solid var(--border); }
+  .model-anims button.on { color: var(--text); border-color: var(--accent); }
+  .model-view .hint { position: absolute; right: 8px; bottom: 8px; color: var(--muted); font-size: 11px; pointer-events: none; }
   .model-textures { display: flex; gap: 8px; flex-wrap: wrap; }
+  .model-textures figure.on img { border-color: var(--accent); }
+  .model-textures figure { cursor: pointer; }
   .model-textures img { width: 72px; height: 72px; image-rendering: pixelated; background: repeating-conic-gradient(#1e222b 0 25%, #171a21 0 50%) 0 0 / 12px 12px; border: 1px solid var(--border); border-radius: 6px; object-fit: contain; }
   .model-textures figure { margin: 0; display: grid; gap: 3px; justify-items: center; font-size: 11px; color: var(--muted); max-width: 72px; }
   .model-textures figcaption { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 72px; }
@@ -460,6 +469,7 @@
   </div>
 </div>
 
+<script src="/model-viewer.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 let files = [];
@@ -975,6 +985,8 @@ let modelList = [];
 let canDeleteModels = false;
 let lastModelsJson = '';
 let modelFile = null;
+let modelViewers = []; // live WebGL viewers, destroyed on every re-render
+const MAX_VIEWERS = 10; // browsers allow only so many WebGL contexts per page
 
 async function refreshModels() {
   try {
@@ -1032,6 +1044,8 @@ function renderModels() {
   }
 
   const grid = $('model-grid');
+  for (const v of modelViewers) v.destroy();
+  modelViewers = [];
   grid.replaceChildren();
   if (!modelList.length) {
     grid.append(el('div', { className: 'empty', textContent: 'No models yet. Upload the first one above!' }));
@@ -1040,8 +1054,44 @@ function renderModels() {
   for (const m of [...modelList].sort((a, b) => b.added - a.added)) {
     const [stateClass, stateText] = modelState(m);
     const textures = el('div', { className: 'model-textures' });
+    const figures = [];
     for (const t of m.textures.slice(0, 8)) {
-      textures.append(el('figure', {}, el('img', { src: t.src, alt: t.name, title: `${t.id} (${t.width}x${t.height})`, loading: 'lazy' }), el('figcaption', { textContent: t.name, title: t.name })));
+      const fig = el('figure', {}, el('img', { src: t.src, alt: t.name, title: `${t.id} (${t.width}x${t.height})`, loading: 'lazy' }), el('figcaption', { textContent: t.name, title: t.name }));
+      fig.dataset.src = t.src;
+      figures.push(fig);
+      textures.append(fig);
+    }
+    // 3D preview of the first profile, drawn from the .bbmodel inside the jar. Click a texture to see it on the model.
+    let view = null;
+    const profile = m.profiles[0];
+    if (profile && modelViewers.length < MAX_VIEWERS && window.createModelViewer) {
+      const canvas = el('canvas');
+      view = el('div', { className: 'model-view' }, canvas, el('span', { className: 'hint', textContent: 'drag to turn' }));
+      const viewer = createModelViewer(canvas, { animation: profile.animations.includes('idle') ? 'idle' : profile.animations[0] });
+      if (viewer) {
+        modelViewers.push(viewer);
+        const firstTex = m.textures.find(t => t.id === profile.texture) || m.textures[0];
+        if (firstTex) viewer.setTexture(firstTex.src);
+        fetch(profile.bbmodel, { cache: 'no-store' }).then(r => r.json()).then(bb => {
+          viewer.setModel(bb);
+          const names = viewer.animations();
+          if (names.length) {
+            const bar = el('div', { className: 'model-anims' });
+            const current = profile.animations.includes('idle') ? 'idle' : names[0];
+            for (const n of names) {
+              bar.append(el('button', { type: 'button', textContent: n, className: n === current ? 'on' : '', onclick: (e) => {
+                viewer.setAnimation(n);
+                for (const b of bar.children) b.classList.toggle('on', b === e.target);
+              } }));
+            }
+            view.append(bar);
+          }
+        }).catch(() => { view.append(el('span', { className: 'hint', textContent: 'could not load the model' })); });
+        for (const fig of figures) {
+          fig.classList.toggle('on', fig.dataset.src === (firstTex && firstTex.src));
+          fig.onclick = () => { viewer.setTexture(fig.dataset.src); for (const f of figures) f.classList.toggle('on', f === fig); };
+        }
+      } else view = null;
     }
     const tags = el('div', { className: 'poi-tags' }, el('span', { className: 'status ' + stateClass, textContent: stateText }));
     for (const p of m.profiles.slice(0, 3)) {
@@ -1051,8 +1101,9 @@ function renderModels() {
     const meta = [m.file, fmtSize(m.size || 0), 'added ' + (m.by ? `by ${m.by} ` : '') + fmtDate(m.added)];
     if (m.status === 'uploaded' && m.uploadedAt) meta.push('on server since ' + fmtDate(m.uploadedAt));
     const card = el('div', { className: 'model ' + stateClass + (m.added > seenAt ? ' new' : '') },
-      el('div', { className: 'poi-top' }, el('div', { className: 'model-title', textContent: m.name }), tags),
-      textures,
+      el('div', { className: 'poi-top' }, el('div', { className: 'model-title', textContent: m.name }), tags));
+    if (view) card.append(view);
+    card.append(textures,
       el('div', { className: 'model-meta', textContent: meta.join(' · ') }));
     if (m.note) card.append(el('div', { className: 'model-note', textContent: m.note }));
     for (const w of m.warnings || []) card.append(el('div', { className: 'model-warn', textContent: '⚠ ' + w }));

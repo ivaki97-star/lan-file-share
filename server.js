@@ -1053,6 +1053,7 @@ function modelInfo(m, req) {
     download: '/files/' + encSegs([MODELS_DIR, m.folder, m.file]),
     url: `http://${host}/files/${encSegs([MODELS_DIR, m.folder, m.file])}`,
     textures: (m.textures || []).map((t) => ({ ...t, src: `/api/models/${m.id}/texture/${encodeURIComponent(t.file)}` })),
+    profiles: (m.profiles || []).map((p) => ({ ...p, bbmodel: `/api/models/${m.id}/bbmodel/${encodeURIComponent(p.name)}` })),
     pending: m.status === 'uploaded' && m.uploadedFile !== m.file, // changed since the admin last put it on the server
   };
 }
@@ -1249,6 +1250,22 @@ function downloadModels(req, res, url) {
   return downloadZip(req, res, { full: path.join(SHARE_DIR, MODELS_DIR), name: 'models', segs: [MODELS_DIR] }, entries);
 }
 
+// GET /api/models/:id/bbmodel/<profile name>  -> the Blockbench model JSON of that profile, read out of the jar.
+function modelBBModel(req, res, m, nameRaw) {
+  let name = '';
+  try { name = decodeURIComponent(nameRaw); } catch { /* bad escape */ }
+  const profile = (m.profiles || []).find((x) => x.name === name);
+  if (!profile) return sendJson(res, 404, { error: 'Profile not found' });
+  const [ns, modelPath] = profile.model.split(':');
+  try {
+    const files = readZip(fs.readFileSync(path.join(modelDir(m), m.file)));
+    const data = files.get(`assets/${ns}/${modelPath}.bbmodel`);
+    if (!data) return sendJson(res, 404, { error: 'Model file not found in the jar' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': data.length, 'Cache-Control': 'no-cache' });
+    res.end(data);
+  } catch (e) { sendJson(res, 500, { error: 'Could not read the model: ' + e.message }); }
+}
+
 function modelTexture(req, res, m, fileRaw) {
   let file = '';
   try { file = decodeURIComponent(fileRaw); } catch { /* bad escape */ }
@@ -1267,6 +1284,10 @@ const server = http.createServer((req, res) => {
     if ((req.method === 'GET' || req.method === 'HEAD') && p === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return req.method === 'HEAD' ? res.end() : fs.createReadStream(INDEX_FILE).pipe(res);
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/model-viewer.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
+      return req.method === 'HEAD' ? res.end() : fs.createReadStream(path.join(__dirname, 'public', 'model-viewer.js')).pipe(res);
     }
     if (req.method === 'GET' && p === '/api/files') return listFiles(req, res, url);
     if (req.method === 'PUT' && p === '/api/upload') return upload(req, res, url);
@@ -1312,6 +1333,7 @@ const server = http.createServer((req, res) => {
       const m = models.find((x) => String(x.id) === idPart);
       if (!m) return sendJson(res, 404, { error: 'Model not found' });
       if (req.method === 'GET' && action === 'texture' && extra) return modelTexture(req, res, m, extra);
+      if (req.method === 'GET' && action === 'bbmodel' && extra) return modelBBModel(req, res, m, extra);
       if (req.method === 'PUT' && action === 'skins') return uploadSkin(req, res, m, url);
       if (req.method === 'PATCH' && !action) return patchModel(req, res, m);
       if (req.method === 'DELETE' && !action) {
