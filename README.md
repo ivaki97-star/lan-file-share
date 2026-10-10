@@ -20,6 +20,6 @@ Such a jar goes into the `mods` folder on the Minecraft server and on every play
 - **Download all for the server**: gives `models.zip` with every jar and marks the models as uploaded. "Update pending"
   means a skin was added after the last download.
 - **Server admin**: put `tools/apply-models.cmd` into the Minecraft server folder, drop `models.zip` next to it (or leave
-  it in Downloads) and run it. It copies the jars into `mods\`, replacing older builds, and also into the player pack
-  folder set at the top of the script, updating that pack's `pack.json`. Then restart the server and upload the re-zipped
-  pack as a new installer version.
+  it in Downloads) and run it. It copies the jars into `mods\`, replacing older builds. Then restart the server.
+- **Players**: the mods installer reads `GET /api/models/pack-entries?status=uploaded` (the address is shown on the Models
+  tab) when its `pack.json` lists it under `modListUrls`, so uploaded models install and update without a new pack release.

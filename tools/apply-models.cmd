@@ -17,11 +17,12 @@ exit /b %errorlevel%
 #  3. Restart the Minecraft server.
 #
 #  What it does: copies every model jar from the zip into mods\, replacing older builds of the same
-#  model, and does the same for the player pack folder below so players get the models with the
-#  mods installer (re-zip that folder and upload it as a new installer version afterwards).
+#  model. Players get the same jars through the mods installer, which reads the site's model list.
 # ==========================================================================================
 
-$PackDir = 'C:\Users\fakerdog1\Desktop\MinecraftModPack'   # player pack folder, '' to skip
+$PackDir = ''   # Normally empty: players get models live from the site (modListUrls in pack.json).
+                # Set it to the player pack folder, e.g. 'C:\Users\fakerdog1\Desktop\MinecraftModPack', to also
+                # bundle the jars into that pack as an offline fallback (then re-zip and re-upload the pack).
 
 $ErrorActionPreference = 'Stop'
 $ServerDir = Split-Path -Parent $env:MCMODELS_SELF

@@ -347,7 +347,8 @@
   <section id="tab-models" hidden>
     <p class="model-help">Models are Easy Model Entities packs: a Blockbench model with its textures and animations, built as one <code>.jar</code>
       that goes into the <code>mods</code> folder on the server and on every player. Upload the jar (or the zip the Blockbench exporter makes),
-      add skins to it here, and the server admin downloads everything below.</p>
+      add skins to it here, and the server admin downloads everything below. Players get the uploaded models through the mods installer,
+      whose <code>pack.json</code> must list <code id="model-feed-url">this site's model feed</code>.</p>
     <form class="mod-form" id="model-form" autocomplete="off">
       <h2>Propose a model</h2>
       <label>Name
@@ -984,6 +985,7 @@ async function refreshModels() {
     const data = JSON.parse(text);
     modelList = data.models;
     canDeleteModels = data.canDelete;
+    $('model-feed-url').textContent = data.packEntriesUrl;
     renderModels();
   } catch { lastModelsJson = ''; }
 }
