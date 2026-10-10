@@ -1,0 +1,1433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAN File Share</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #8a92a3;
+    --accent: #4f8cff;
+    --accent-2: #3a74e0;
+    --ok: #3ecf8e;
+    --bad: #ff5d6c;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 24px 16px 64px; }
+  .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 24px; align-items: start; }
+
+  .chat {
+    position: sticky; top: calc(var(--banner-h, 0px) + 16px); /* stays below the pinned installer banner */
+    height: calc(100vh - var(--banner-h, 0px) - 32px - 64px);
+    display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  }
+  .chat-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .chat-head h2 { margin: 0; font-size: 16px; flex: 1; }
+  .chat-head label { color: var(--muted); font-size: 13px; }
+  .chat-head input { width: 130px; }
+  .messages { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .msg-top { display: flex; gap: 8px; align-items: baseline; }
+  .msg-name { font-weight: 600; font-size: 14px; }
+  .msg-time { color: var(--muted); font-size: 11px; }
+  .msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.cont { margin-top: -6px; }
+  .day { text-align: center; color: var(--muted); font-size: 12px; margin: 6px 0; }
+  .chat-form { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+  .chat-form input { flex: 1; min-width: 0; }
+  .text-in {
+    font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  .text-in:focus { outline: none; border-color: var(--accent); }
+  .text-in.need { border-color: var(--bad); }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { margin: 0; font-size: 24px; letter-spacing: .3px; }
+  h1 span { color: var(--accent); }
+  .free { color: var(--muted); font-size: 13px; }
+
+  .drop {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+    padding: 32px 16px;
+    text-align: center;
+    transition: border-color .15s, background .15s;
+  }
+  .drop.over { border-color: var(--accent); background: #18233a; }
+  .drop p { margin: 0 0 14px; color: var(--muted); }
+  .drop strong { color: var(--text); }
+
+  button, .btn {
+    font: inherit;
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    background: var(--accent);
+    color: #fff;
+    text-decoration: none;
+    display: inline-block;
+    white-space: nowrap;
+  }
+  button:hover, .btn:hover { background: var(--accent-2); }
+  .ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); padding: 6px 10px; }
+  .ghost:hover { background: var(--panel-2); color: var(--text); }
+  .danger:hover { color: var(--bad); border-color: var(--bad); background: transparent; }
+
+  .queue { margin-top: 16px; display: grid; gap: 8px; }
+  .job { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .job-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+  .job-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .job-info { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .job.done .job-info { color: var(--ok); }
+  .job.error .job-info { color: var(--bad); }
+  .bar { height: 6px; background: var(--panel-2); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .job.done .bar div { background: var(--ok); }
+  .job.error .bar div { background: var(--bad); }
+
+  .list-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 32px 0 10px; flex-wrap: wrap; }
+  .list-head h2 { margin: 0; font-size: 18px; }
+  .list-head h2 small { color: var(--muted); font-weight: normal; font-size: 14px; }
+  .crumbs a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .crumbs a:hover { text-decoration: underline; }
+  .crumbs .sep { color: var(--muted); margin: 0 6px; font-weight: normal; }
+  .drop-buttons { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .drop-target { margin: 14px 0 0 !important; font-size: 13px; }
+  .file-name .folder-link { color: var(--text); text-decoration: none; cursor: pointer; font-weight: 600; }
+  .file-name .folder-link:hover { color: var(--accent); text-decoration: underline; }
+  .folder-icon { margin-right: 8px; }
+  .uploading-tag { color: #f0b54a; }
+  input[type=search] {
+    font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; width: 240px; max-width: 100%;
+  }
+  input[type=search]:focus { outline: none; border-color: var(--accent); }
+
+  .files { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .file { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--border); }
+  .file:first-child { border-top: 0; }
+  .file:hover { background: var(--panel-2); }
+  .file-main { flex: 1; min-width: 0; }
+  .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-meta { color: var(--muted); font-size: 13px; }
+  .file.new .file-name::after { content: "NEW"; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 8px; vertical-align: 2px; }
+  .actions { display: flex; gap: 6px; }
+  .empty { padding: 32px; text-align: center; color: var(--muted); }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .tab { background: transparent; color: var(--muted); border-radius: 8px 8px 0 0; padding: 10px 18px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { background: var(--panel); color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab small { color: var(--muted); margin-left: 4px; }
+
+  .mod-form { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .mod-form h2 { grid-column: 1 / -1; margin: 0; font-size: 16px; }
+  .mod-form .full { grid-column: 1 / -1; }
+  .mod-form label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
+  .mod-form .text-in { width: 100%; }
+  .mod-form-bottom { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+  .mod-form-bottom select.text-in { width: auto; }
+  .mod-status { color: var(--muted); font-size: 13px; min-height: 1em; margin-right: auto; }
+  .mod-status.warn { color: #f0b54a; }
+  select.text-in { cursor: pointer; }
+  .tabs { flex-wrap: wrap; }
+  .mod-name a { color: var(--text); text-decoration: none; }
+  .mod-name a:hover { color: var(--accent); text-decoration: underline; }
+  .mod { flex-wrap: wrap; row-gap: 8px; }
+  .mod .file-main { flex-basis: 100%; }
+  .mod .file-name { white-space: normal; overflow-wrap: anywhere; }
+  .mod .actions { flex-wrap: wrap; width: 100%; }
+  .mod .actions .btn, .mod .actions button { padding: 4px 10px; font-size: 13px; }
+  .installed-dot { color: var(--ok); margin-right: 6px; }
+  @media (max-width: 560px) { .mod-form { grid-template-columns: 1fr; } }
+
+  .poi-parsed { font-size: 12px; min-height: 1em; }
+  .poi-parsed.ok { color: var(--ok); }
+  .poi-parsed.bad { color: var(--bad); }
+  .poi-filters { display: flex; gap: 8px; flex-wrap: wrap; }
+  .poi-filters select.text-in { background: var(--panel); }
+  .poi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; }
+  .poi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .poi.editing { border-color: var(--accent); }
+  .poi-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+  .poi-title { font-weight: 600; font-size: 16px; overflow-wrap: anywhere; }
+  .poi.new .poi-title::after { content: "NEW"; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 8px; vertical-align: 2px; }
+  .poi-tags { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .tag { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
+  .tag.the_nether { color: #ff8a6b; border-color: #6b2f24; }
+  .tag.the_end { color: #c9a2ff; border-color: #4a3470; }
+  .poi-coords { font-family: ui-monospace, Consolas, monospace; font-size: 14px; }
+  .poi-coords span { color: var(--muted); margin-right: 2px; }
+  .poi-coords b { font-weight: 600; margin-right: 12px; }
+  .cmd { display: flex; align-items: center; gap: 8px; background: #0b0d11; border: 1px solid var(--border); border-radius: 8px; padding: 5px 5px 5px 10px; cursor: pointer; }
+  .cmd:hover { border-color: var(--accent); }
+  .cmd code { flex: 1; min-width: 0; font: 13px ui-monospace, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #b8f5c8; }
+  .cmd button { padding: 4px 12px; font-size: 13px; }
+  .cmd button.copied { background: var(--ok); }
+  .poi-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .poi-foot .actions button { padding: 3px 9px; font-size: 12px; }
+  /* Mods installer banner, pinned to the top on every tab */
+  .banner { position: sticky; top: 0; z-index: 20; background: linear-gradient(90deg, #142542, #171c27); border-bottom: 1px solid #2b4677; }
+  .banner-inner { max-width: 1320px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .banner-icon { font-size: 24px; line-height: 1; }
+  .banner-main { flex: 1; min-width: 200px; }
+  .banner-title { font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .banner-title .ver { color: #8fb6ff; }
+  .banner-sub { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .banner-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .banner .btn.big { padding: 9px 18px; font-weight: 600; }
+  .banner .btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .banner .btn.secondary:hover { border-color: var(--ok); }
+  .banner .all { color: var(--muted); font-size: 13px; cursor: pointer; text-decoration: none; }
+  .banner .all:hover { color: var(--text); text-decoration: underline; }
+  .banner.none .banner-title { color: var(--muted); font-weight: normal; }
+  .rtag { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 0 8px; border: 1px solid currentColor; white-space: nowrap; }
+  .rtag.Recent { color: #8fb6ff; }
+  .rtag.Stable { color: var(--ok); }
+  .rtag.Beta { color: #f0b54a; }
+  .rtag.Hotfix { color: #ff8a6b; }
+  .rtag.off { color: #555c6b; font-weight: normal; }
+  button.rtag { background: transparent; cursor: pointer; padding: 1px 9px; }
+  button.rtag:hover { background: var(--panel-2); }
+
+  /* Deliberately easy to miss: only the person maintaining the installer needs it */
+  .installer-link { text-align: right; margin-top: 10px; }
+  .installer-link a { font-size: 11px; color: #3d4350; cursor: default; text-decoration: none; }
+  .installer-link a:hover { color: #5d6575; }
+
+  .modal-bg { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .6); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
+  .modal { background: var(--bg); border: 1px solid var(--border); border-radius: 14px; width: 100%; max-width: 760px; padding: 18px; display: grid; gap: 14px; }
+  .modal-head { display: flex; justify-content: space-between; align-items: center; }
+  .modal-head h2 { margin: 0; font-size: 20px; }
+  .modal h3 { margin: 6px 0 0; font-size: 16px; }
+  .mod-form .field { display: grid; gap: 8px; color: var(--muted); font-size: 13px; align-content: start; }
+  .tag-checks { display: flex; gap: 14px; flex-wrap: wrap; color: var(--text); font-size: 14px; }
+  .tag-checks label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .rel-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .rel-pick span { color: var(--muted); font-size: 13px; }
+  .rel-pick span.ready { color: var(--ok); }
+  textarea.text-in { resize: vertical; min-height: 60px; font: inherit; }
+  .rel-row .file-meta { white-space: pre-wrap; }
+  .rel-row .file-name { white-space: normal; }
+  .rel-tags { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: 1px; flex-wrap: wrap; }
+
+  .poi-grid .empty { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    .chat { position: static; height: 70vh; order: 2; }
+  }
+  @media (max-width: 560px) {
+    .file { flex-wrap: wrap; }
+    .actions { width: 100%; justify-content: flex-end; }
+    input[type=search] { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="banner none" id="banner">
+  <div class="banner-inner">
+    <span class="banner-icon">🧩</span>
+    <div class="banner-main">
+      <div class="banner-title" id="banner-title">Mods installer: nothing uploaded yet</div>
+      <div class="banner-sub" id="banner-sub"></div>
+    </div>
+    <div class="banner-actions" id="banner-actions"></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="installer-modal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>🧩 Mods installer versions</h2>
+      <button class="ghost" id="installer-close" type="button">Close</button>
+    </div>
+    <form class="mod-form" id="release-form" autocomplete="off">
+      <h2>Upload a new version</h2>
+      <label>Version
+        <input class="text-in" id="rel-version" maxlength="40" placeholder="e.g. 1.4.2">
+      </label>
+      <div class="field">Tags
+        <span class="tag-checks" id="rel-tags"></span>
+      </div>
+      <label class="full">What changed (optional, shown in the banner)
+        <textarea class="text-in" id="rel-note" maxlength="500" placeholder="e.g. Added Sodium 0.6, removed OptiFine"></textarea>
+      </label>
+      <div class="full rel-pick">
+        <button type="button" id="rel-pick-folder">Choose folder</button>
+        <button type="button" class="ghost" id="rel-pick-files">Choose files</button>
+        <span id="rel-picked">Nothing chosen yet. You can also drop the folder onto this window.</span>
+        <input type="file" id="rel-input-folder" webkitdirectory hidden>
+        <input type="file" id="rel-input-files" multiple hidden>
+      </div>
+      <div class="mod-form-bottom">
+        <span class="mod-status" id="rel-status"></span>
+        <button id="rel-submit">Upload version</button>
+      </div>
+    </form>
+    <div class="queue" id="rel-queue"></div>
+    <h3>All versions</h3>
+    <div class="files" id="rel-list"></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <header>
+    <h1>LAN <span>File Share</span></h1>
+    <div class="free" id="free"></div>
+  </header>
+
+  <div class="layout">
+  <aside class="chat">
+    <div class="chat-head">
+      <h2>Chat</h2>
+      <label for="nick">Name</label>
+      <input class="text-in" id="nick" maxlength="24" placeholder="Your name">
+    </div>
+    <div class="messages" id="messages"></div>
+    <form class="chat-form" id="chat-form" autocomplete="off">
+      <input class="text-in" id="chat-text" placeholder="Say something...">
+      <button>Send</button>
+    </form>
+  </aside>
+
+  <main>
+  <nav class="tabs">
+    <button class="tab" data-tab="files">Files <small id="files-count"></small></button>
+    <button class="tab" data-tab="links">Mod suggestions <small id="links-count"></small></button>
+    <button class="tab" data-tab="installed">Installed on server <small id="installed-count"></small></button>
+    <button class="tab" data-tab="pois">Places <small id="pois-count"></small></button>
+  </nav>
+
+  <section id="tab-pois" hidden>
+    <form class="mod-form" id="poi-form" autocomplete="off">
+      <h2 id="poi-form-title">Add a place</h2>
+      <label class="full">Title
+        <input class="text-in" id="poi-title" maxlength="100" placeholder="e.g. Main base, Blaze spawner, Mushroom island">
+      </label>
+      <label class="full">Coordinates
+        <input class="text-in" id="poi-coords" placeholder="X Y Z, e.g. 120 64 -350 (or paste what F3+C copies in-game)">
+        <span class="poi-parsed" id="poi-parsed"></span>
+      </label>
+      <label>Dimension
+        <select class="text-in" id="poi-dim">
+          <option value="overworld">Overworld</option>
+          <option value="the_nether">Nether</option>
+          <option value="the_end">End</option>
+        </select>
+      </label>
+      <label>Type (optional)
+        <select class="text-in" id="poi-type"><option value="">No type</option></select>
+      </label>
+      <div class="mod-form-bottom">
+        <span class="mod-status" id="poi-status"></span>
+        <button type="button" class="ghost" id="poi-cancel" hidden>Cancel edit</button>
+        <button id="poi-submit">Add place</button>
+      </div>
+    </form>
+    <div class="list-head">
+      <h2>Places <small id="poi-shown"></small></h2>
+      <div class="poi-filters">
+        <select class="text-in" id="poi-filter-type"><option value="">All types</option></select>
+        <input type="search" id="poi-search" placeholder="Search places...">
+      </div>
+    </div>
+    <div class="poi-grid" id="poi-grid"></div>
+  </section>
+
+  <section id="tab-mods" hidden>
+    <form class="mod-form" id="mod-form" autocomplete="off">
+      <h2 id="mod-form-title">Add a mod</h2>
+      <label class="full">Link
+        <input class="text-in" id="mod-url" placeholder="Paste the mod's page link, e.g. https://www.nexusmods.com/...">
+      </label>
+      <label>Name
+        <input class="text-in" id="mod-name" maxlength="150" placeholder="Filled in from the site">
+      </label>
+      <label>Note (optional)
+        <input class="text-in" id="mod-note" maxlength="200" placeholder="Version, load order, etc.">
+      </label>
+      <div class="mod-form-bottom">
+        <span class="mod-status" id="mod-status"></span>
+        <button>Add mod</button>
+      </div>
+    </form>
+    <div class="list-head">
+      <h2 id="mod-list-title">Mod suggestions</h2>
+      <input type="search" id="mod-search" placeholder="Search mods...">
+    </div>
+    <div class="files" id="mod-list"></div>
+  </section>
+
+  <section id="tab-files">
+  <div class="drop" id="drop">
+    <p><strong>Drag files or folders here</strong> to upload, or</p>
+    <div class="drop-buttons">
+      <button id="pick">Choose files</button>
+      <button id="pick-folder">Choose folder</button>
+    </div>
+    <input type="file" id="input" multiple hidden>
+    <input type="file" id="input-folder" webkitdirectory hidden>
+    <p class="drop-target" id="drop-target" hidden></p>
+  </div>
+
+  <div class="queue" id="queue"></div>
+
+  <div class="list-head">
+    <h2><span class="crumbs" id="crumbs"></span> <small id="count"></small></h2>
+    <input type="search" id="search" placeholder="Search files...">
+  </div>
+  <div class="files" id="files"><div class="empty">Loading...</div></div>
+  <div class="installer-link"><a id="open-installer">mods installer upload</a></div>
+  </section>
+  </main>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let files = [];
+let canDelete = false;
+let lastJson = '';
+let cwd = []; // folder being viewed, e.g. ['Mods', 'textures']
+const seenAt = Date.now();
+const encPath = (segs) => segs.map(encodeURIComponent).join('/');
+
+function fmtSize(b) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+function fmtTime(s) {
+  if (!isFinite(s)) return '';
+  s = Math.round(s);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
+}
+function fmtDate(ms) {
+  const d = new Date(ms);
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+}
+function el(tag, props, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids);
+  return e;
+}
+
+// ---------- file list ----------
+async function refresh() {
+  try {
+    const wanted = cwd.join('/');
+    const res = await fetch('/api/files?path=' + encodeURIComponent(wanted), { cache: 'no-store' });
+    if (res.status === 404 && cwd.length) return openFolder(cwd.slice(0, -1)); // folder was deleted
+    const text = await res.text();
+    if (wanted !== cwd.join('/') || text === lastJson) return; // folder changed while loading, or nothing new
+    lastJson = text;
+    const data = JSON.parse(text);
+    // Folders first, then newest first.
+    files = data.entries.sort((a, b) => (a.type === b.type ? b.mtime - a.mtime : a.type === 'folder' ? -1 : 1));
+    canDelete = data.canDelete;
+    $('free').textContent = data.free != null ? fmtSize(data.free) + ' free on host' : '';
+    render();
+  } catch {
+    $('free').textContent = 'Server unreachable...';
+    lastJson = '';
+  }
+}
+
+function openFolder(segs) {
+  cwd = segs;
+  lastJson = '';
+  files = [];
+  $('search').value = '';
+  render();
+  refresh();
+}
+
+function render() {
+  // Breadcrumbs: Shared files / Mods / textures
+  const crumbs = $('crumbs');
+  crumbs.replaceChildren();
+  const parts = [['Shared files', []], ...cwd.map((name, i) => [name, cwd.slice(0, i + 1)])];
+  parts.forEach(([label, segs], i) => {
+    if (i) crumbs.append(el('span', { className: 'sep', textContent: '/' }));
+    crumbs.append(i === parts.length - 1 ? label : el('a', { textContent: label, onclick: () => openFolder(segs) }));
+  });
+  $('drop-target').hidden = !cwd.length;
+  $('drop-target').textContent = 'Uploads go into: ' + cwd.join(' / ');
+
+  const q = $('search').value.trim().toLowerCase();
+  const shown = q ? files.filter(f => f.name.toLowerCase().includes(q)) : files;
+  const total = files.reduce((s, f) => s + f.size, 0);
+  $('count').textContent = files.length ? `${files.length} item${files.length > 1 ? 's' : ''}, ${fmtSize(total)}` : '';
+  if (!cwd.length) $('files-count').textContent = files.length || '';
+
+  const box = $('files');
+  box.replaceChildren();
+  if (cwd.length) {
+    box.append(el('div', { className: 'file' },
+      el('div', { className: 'file-main' },
+        el('div', { className: 'file-name' }, el('a', { className: 'folder-link', textContent: '↩ Back', onclick: () => openFolder(cwd.slice(0, -1)) })))));
+  }
+  if (!shown.length) {
+    box.append(el('div', { className: 'empty', textContent: q ? 'Nothing matches your search.' : cwd.length ? 'This folder is empty.' : 'Nothing shared yet. Be the first!' }));
+    return;
+  }
+  for (const f of shown) {
+    const segs = [...cwd, f.name];
+    const actions = el('div', { className: 'actions' });
+    let name, meta;
+    if (f.type === 'folder') {
+      name = el('div', { className: 'file-name', title: f.name },
+        el('span', { className: 'folder-icon', textContent: '📁' }),
+        el('a', { className: 'folder-link', textContent: f.name, onclick: () => openFolder(segs) }));
+      meta = el('div', { className: 'file-meta' }, `${f.count} file${f.count === 1 ? '' : 's'} · ${fmtSize(f.size)} · ${fmtDate(f.mtime)}`);
+      if (f.uploading) meta.append(el('span', { className: 'uploading-tag', textContent: ' · still uploading...' }));
+      actions.append(
+        el('button', { className: 'ghost', textContent: 'Open', onclick: () => openFolder(segs) }),
+        el('a', { className: 'btn', href: '/zip/' + encPath(segs), download: f.name + '.zip', textContent: 'Download ZIP' }));
+    } else {
+      name = el('div', { className: 'file-name', textContent: f.name, title: f.name });
+      meta = el('div', { className: 'file-meta', textContent: `${fmtSize(f.size)} · ${fmtDate(f.mtime)}` });
+      actions.append(el('a', { className: 'btn', href: '/files/' + encPath(segs), download: f.name, textContent: 'Download' }));
+    }
+    if (canDelete) {
+      actions.append(el('button', { className: 'ghost danger', textContent: 'Delete', onclick: () => del(segs, f.type) }));
+    }
+    box.append(el('div', { className: 'file' + (f.mtime > seenAt ? ' new' : '') },
+      el('div', { className: 'file-main' }, name, meta),
+      actions));
+  }
+}
+
+async function del(segs, type) {
+  const what = type === 'folder' ? `the folder "${segs.at(-1)}" and everything in it` : `"${segs.at(-1)}"`;
+  if (!confirm(`Delete ${what} for everyone?`)) return;
+  const res = await fetch('/api/files/' + encPath(segs), { method: 'DELETE' });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Delete failed');
+  lastJson = '';
+  refresh();
+}
+
+$('search').addEventListener('input', render);
+refresh();
+setInterval(refresh, 3000);
+
+// ---------- tabs ----------
+const TABS = ['files', 'links', 'installed', 'pois'];
+let currentTab = 'files';
+function showTab(name) {
+  currentTab = name;
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.tab === name);
+  $('tab-files').hidden = name !== 'files';
+  $('tab-mods').hidden = name !== 'links' && name !== 'installed'; // both mod tabs share one form and list
+  $('tab-pois').hidden = name !== 'pois';
+  if (name === 'links' || name === 'installed') renderMods();
+  try { localStorage.setItem('tab', name); } catch {}
+}
+for (const t of document.querySelectorAll('.tab')) t.onclick = () => showTab(t.dataset.tab);
+
+const myName = () => $('nick').value.trim(); // the chat name doubles as "added by"
+
+// ---------- mods ----------
+let mods = [];
+let canDeleteMods = false;
+let lastModsJson = '';
+
+async function refreshMods() {
+  try {
+    const res = await fetch('/api/mods', { cache: 'no-store' });
+    const text = await res.text();
+    if (text === lastModsJson) return;
+    lastModsJson = text;
+    const data = JSON.parse(text);
+    mods = data.mods;
+    canDeleteMods = data.canDelete;
+    renderMods();
+  } catch { lastModsJson = ''; }
+}
+
+function renderMods() {
+  const installedTab = currentTab === 'installed';
+  $('links-count').textContent = mods.filter(m => !m.installed).length || '';
+  $('installed-count').textContent = mods.filter(m => m.installed).length || '';
+  $('mod-form-title').textContent = installedTab ? 'Add a mod that is installed on the server' : 'Suggest a mod';
+  $('mod-list-title').textContent = installedTab ? 'Installed on server' : 'Mod suggestions';
+
+  const q = $('mod-search').value.trim().toLowerCase();
+  const list = mods
+    .filter(m => m.installed === installedTab)
+    .filter(m => !q || [m.name, m.note, m.url, m.by].some(v => (v || '').toLowerCase().includes(q)))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+  const box = $('mod-list');
+  box.replaceChildren();
+  if (!list.length) {
+    const text = q ? 'No mods match your search.' : installedTab ? 'Nothing marked as installed yet.' : 'No mod suggestions yet. Paste a link above!';
+    box.append(el('div', { className: 'empty', textContent: text }));
+    return;
+  }
+  for (const m of list) {
+    const name = el('div', { className: 'file-name mod-name', title: m.name });
+    if (m.installed) name.append(el('span', { className: 'installed-dot', textContent: '✔' }));
+    name.append(m.url ? el('a', { href: m.url, target: '_blank', rel: 'noopener noreferrer', textContent: m.name }) : m.name);
+
+    const meta = [];
+    if (m.url) meta.push(new URL(m.url).hostname.replace(/^www\./, ''));
+    if (m.note) meta.push(m.note);
+    meta.push('added ' + (m.by ? `by ${m.by} ` : '') + fmtDate(m.added));
+
+    const actions = el('div', { className: 'actions' });
+    if (m.url) actions.append(el('a', { className: 'btn', href: m.url, target: '_blank', rel: 'noopener noreferrer', textContent: 'Open' }));
+    actions.append(
+      el('button', { className: 'ghost', textContent: m.installed ? 'Move to suggestions' : 'Mark installed', onclick: () => updateMod(m, { installed: !m.installed }) }),
+      el('button', { className: 'ghost', textContent: 'Edit', onclick: () => editMod(m) }));
+    if (canDeleteMods) actions.append(el('button', { className: 'ghost danger', textContent: 'Remove', onclick: () => removeMod(m) }));
+    box.append(el('div', { className: 'file mod' + (m.added > seenAt ? ' new' : '') },
+      el('div', { className: 'file-main' }, name, el('div', { className: 'file-meta', textContent: meta.join(' · ') })),
+      actions));
+  }
+}
+$('mod-search').addEventListener('input', renderMods);
+
+async function modRequest(path, method, body) {
+  const res = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Something went wrong');
+  lastModsJson = '';
+  await refreshMods();
+  return data;
+}
+
+async function updateMod(m, changes) {
+  try { await modRequest('/api/mods/' + m.id, 'PATCH', changes); } catch (e) { alert(e.message); }
+}
+
+async function editMod(m) {
+  const name = prompt('Mod name:', m.name);
+  if (name === null) return;
+  const note = prompt('Note (version, load order, etc.):', m.note || '');
+  if (note === null) return;
+  const url = prompt('Link:', m.url || '');
+  if (url === null) return;
+  updateMod(m, { name, note, url });
+}
+
+async function removeMod(m) {
+  if (!confirm(`Remove "${m.name}" from the list?`)) return;
+  try { await modRequest('/api/mods/' + m.id, 'DELETE'); } catch (e) { alert(e.message); }
+}
+
+// Fill in the name from the site's title when a link is pasted, unless the name was typed by hand.
+let nameTyped = false;
+let titleTimer = null;
+let titleRequest = 0;
+$('mod-name').addEventListener('input', () => { nameTyped = $('mod-name').value.trim() !== ''; });
+$('mod-url').addEventListener('input', () => {
+  clearTimeout(titleTimer);
+  titleTimer = setTimeout(lookupTitle, 400);
+});
+
+async function lookupTitle() {
+  const url = $('mod-url').value.trim();
+  const status = $('mod-status');
+  const id = ++titleRequest;
+  status.className = 'mod-status';
+  status.textContent = '';
+  if (!url || nameTyped) return;
+  status.textContent = 'Getting the name from the site...';
+  try {
+    const res = await fetch('/api/title?url=' + encodeURIComponent(url));
+    const data = await res.json();
+    if (id !== titleRequest || nameTyped) return; // a newer link was pasted, or the name was typed meanwhile
+    if (!res.ok) { status.className = 'mod-status warn'; status.textContent = data.error || 'Could not read that link'; return; }
+    $('mod-name').value = data.title;
+    if (data.guessed) {
+      status.className = 'mod-status warn';
+      status.textContent = data.title ? 'Couldn\'t read the site, name guessed from the link. Check it.' : 'Couldn\'t read the site. Type the name.';
+    } else {
+      status.textContent = 'Name filled in from the site.';
+    }
+  } catch {
+    if (id === titleRequest) { status.className = 'mod-status warn'; status.textContent = 'Couldn\'t read the site. Type the name.'; }
+  }
+}
+
+$('mod-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    url: $('mod-url').value.trim(),
+    name: $('mod-name').value.trim(),
+    note: $('mod-note').value.trim(),
+    installed: currentTab === 'installed',
+    by: myName(),
+  };
+  if (!body.name) {
+    $('mod-name').classList.add('need');
+    $('mod-name').focus();
+    return;
+  }
+  // Clear right away so the next link can be pasted while this one saves.
+  $('mod-url').value = $('mod-name').value = $('mod-note').value = '';
+  $('mod-status').textContent = '';
+  nameTyped = false;
+  titleRequest++;
+  $('mod-url').focus();
+  try {
+    await modRequest('/api/mods', 'POST', body);
+  } catch (err) {
+    if (!$('mod-url').value && !$('mod-name').value) {
+      $('mod-url').value = body.url;
+      $('mod-name').value = body.name;
+      $('mod-note').value = body.note;
+      nameTyped = true;
+    }
+    alert(err.message);
+  }
+});
+$('mod-name').addEventListener('input', () => $('mod-name').classList.remove('need'));
+
+refreshMods();
+setInterval(refreshMods, 4000);
+
+// ---------- POIs ----------
+const TYPE_ICONS = {
+  'Base': '🏠', 'Farm': '🌾', 'Village': '🏘️', 'Portal': '🌀', 'Spawner': '💀', 'Mine / Cave': '⛏️',
+  'Structure': '🏛️', 'Biome': '🌲', 'Shop': '💰', 'Build': '🧱', 'Danger': '⚠️', 'Other': '📍',
+};
+const DIM_NAMES = { overworld: 'Overworld', the_nether: 'Nether', the_end: 'End' };
+let pois = [];
+let poiTypes = [];
+let canDeletePois = false;
+let lastPoisJson = '';
+let editingPoi = null; // id of the POI loaded into the form, or null when adding
+
+const fmtCoord = (n) => String(Math.round(n * 100) / 100);
+
+// Overworld uses the plain /tp. Other dimensions need "execute in" or /tp would land you in the dimension you're standing in.
+function tpCommand(p) {
+  const xyz = `${fmtCoord(p.x)} ${fmtCoord(p.y)} ${fmtCoord(p.z)}`;
+  return p.dim === 'overworld' ? `/tp ${xyz}` : `/execute in minecraft:${p.dim} run tp @s ${xyz}`;
+}
+
+// Accepts "120 64 -350", "120, 64, -350", "X: 120 Y: 64 Z: -350" or Minecraft's F3+C text
+// ("/execute in minecraft:the_nether run tp @s 120.50 64.00 -350.30 90.0 12.5").
+function parseCoords(text) {
+  const dim = (/minecraft:(overworld|the_nether|the_end)/.exec(text) || [])[1] || null;
+  const afterTp = /tp\s+@s\s+(.*)$/.exec(text);
+  const nums = ((afterTp ? afterTp[1] : text).match(/[-+]?\d+(?:\.\d+)?/g) || []).map(Number);
+  return nums.length >= 3 ? { x: nums[0], y: nums[1], z: nums[2], dim } : null;
+}
+
+// navigator.clipboard only works on https or localhost, and friends open the site over plain http.
+async function copyText(text) {
+  if (window.isSecureContext && navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+  }
+  const ta = el('textarea', { value: text });
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  return ok;
+}
+
+async function refreshPois() {
+  try {
+    const res = await fetch('/api/pois', { cache: 'no-store' });
+    const text = await res.text();
+    if (text === lastPoisJson) return;
+    lastPoisJson = text;
+    const data = JSON.parse(text);
+    pois = data.pois;
+    canDeletePois = data.canDelete;
+    if (!poiTypes.length) {
+      poiTypes = data.types;
+      for (const t of poiTypes) {
+        $('poi-type').append(el('option', { value: t, textContent: `${TYPE_ICONS[t] || ''} ${t}` }));
+        $('poi-filter-type').append(el('option', { value: t, textContent: `${TYPE_ICONS[t] || ''} ${t}` }));
+      }
+    }
+    renderPois();
+  } catch { lastPoisJson = ''; }
+}
+
+function renderPois() {
+  $('pois-count').textContent = pois.length || '';
+  const q = $('poi-search').value.trim().toLowerCase();
+  const type = $('poi-filter-type').value;
+  const shown = pois
+    .filter(p => !type || p.type === type)
+    .filter(p => !q || [p.title, p.type, p.by, DIM_NAMES[p.dim], `${p.x} ${p.y} ${p.z}`].some(v => (v || '').toLowerCase().includes(q)))
+    .sort((a, b) => b.added - a.added);
+  $('poi-shown').textContent = pois.length ? (shown.length === pois.length ? `${pois.length}` : `${shown.length} of ${pois.length}`) : '';
+
+  const grid = $('poi-grid');
+  grid.replaceChildren();
+  if (!shown.length) {
+    grid.append(el('div', { className: 'empty', textContent: pois.length ? 'No places match.' : 'No places yet. Add the first one above!' }));
+    return;
+  }
+  for (const p of shown) {
+    const cmd = tpCommand(p);
+    const copyBtn = el('button', { textContent: 'Copy', type: 'button' });
+    const cmdBox = el('div', { className: 'cmd', title: 'Click to copy' }, el('code', { textContent: cmd }), copyBtn);
+    cmdBox.onclick = async () => {
+      const ok = await copyText(cmd);
+      copyBtn.textContent = ok ? 'Copied!' : 'Copy failed';
+      copyBtn.classList.toggle('copied', ok);
+      setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 1500);
+    };
+
+    const tags = el('div', { className: 'poi-tags' });
+    if (p.type) tags.append(el('span', { className: 'tag', textContent: `${TYPE_ICONS[p.type] || ''} ${p.type}` }));
+    if (p.dim !== 'overworld') tags.append(el('span', { className: 'tag ' + p.dim, textContent: DIM_NAMES[p.dim] }));
+
+    const actions = el('div', { className: 'actions' },
+      el('button', { className: 'ghost', textContent: 'Edit', type: 'button', onclick: () => editPoi(p) }));
+    if (canDeletePois) actions.append(el('button', { className: 'ghost danger', textContent: 'Delete', type: 'button', onclick: () => deletePoi(p) }));
+
+    grid.append(el('div', { className: 'poi' + (p.added > seenAt ? ' new' : '') + (editingPoi === p.id ? ' editing' : '') },
+      el('div', { className: 'poi-top' }, el('div', { className: 'poi-title', textContent: p.title }), tags),
+      el('div', { className: 'poi-coords' },
+        el('span', { textContent: 'X' }), el('b', { textContent: fmtCoord(p.x) }),
+        el('span', { textContent: 'Y' }), el('b', { textContent: fmtCoord(p.y) }),
+        el('span', { textContent: 'Z' }), el('b', { textContent: fmtCoord(p.z) })),
+      cmdBox,
+      el('div', { className: 'poi-foot' },
+        el('span', { textContent: 'added ' + (p.by ? `by ${p.by} ` : '') + fmtDate(p.added) }),
+        actions)));
+  }
+}
+$('poi-search').addEventListener('input', renderPois);
+$('poi-filter-type').addEventListener('change', renderPois);
+
+// Live feedback while typing coordinates; F3+C text also sets the dimension.
+function showParsed() {
+  const text = $('poi-coords').value.trim();
+  const out = $('poi-parsed');
+  $('poi-coords').classList.remove('need');
+  if (!text) { out.textContent = ''; return null; }
+  const c = parseCoords(text);
+  if (!c) {
+    out.className = 'poi-parsed bad';
+    out.textContent = 'Needs three numbers: X Y Z';
+    return null;
+  }
+  if (c.dim) $('poi-dim').value = c.dim;
+  out.className = 'poi-parsed ok';
+  out.textContent = `X ${fmtCoord(c.x)} · Y ${fmtCoord(c.y)} · Z ${fmtCoord(c.z)}${c.dim ? ' · ' + DIM_NAMES[c.dim] : ''}`;
+  return c;
+}
+$('poi-coords').addEventListener('input', showParsed);
+$('poi-title').addEventListener('input', () => $('poi-title').classList.remove('need'));
+
+function resetPoiForm() {
+  editingPoi = null;
+  $('poi-title').value = $('poi-coords').value = '';
+  $('poi-dim').value = 'overworld';
+  $('poi-type').value = '';
+  $('poi-parsed').textContent = '';
+  $('poi-form-title').textContent = 'Add a place';
+  $('poi-submit').textContent = 'Add place';
+  $('poi-cancel').hidden = true;
+  renderPois();
+}
+
+function editPoi(p) {
+  editingPoi = p.id;
+  $('poi-title').value = p.title;
+  $('poi-coords').value = `${fmtCoord(p.x)} ${fmtCoord(p.y)} ${fmtCoord(p.z)}`;
+  $('poi-dim').value = p.dim;
+  $('poi-type').value = p.type || '';
+  showParsed();
+  $('poi-form-title').textContent = `Edit "${p.title}"`;
+  $('poi-submit').textContent = 'Save changes';
+  $('poi-cancel').hidden = false;
+  renderPois();
+  $('poi-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('poi-title').focus();
+}
+$('poi-cancel').onclick = resetPoiForm;
+
+async function deletePoi(p) {
+  if (!confirm(`Delete the place "${p.title}" for everyone?`)) return;
+  const res = await fetch('/api/pois/' + p.id, { method: 'DELETE' });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Delete failed');
+  if (editingPoi === p.id) resetPoiForm();
+  lastPoisJson = '';
+  refreshPois();
+}
+
+$('poi-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const title = $('poi-title').value.trim();
+  const c = showParsed();
+  if (!title) { $('poi-title').classList.add('need'); $('poi-title').focus(); return; }
+  if (!c) {
+    $('poi-coords').classList.add('need');
+    if (!$('poi-coords').value.trim()) { $('poi-parsed').className = 'poi-parsed bad'; $('poi-parsed').textContent = 'Needs three numbers: X Y Z'; }
+    $('poi-coords').focus();
+    return;
+  }
+  const body = { title, x: c.x, y: c.y, z: c.z, dim: $('poi-dim').value, type: $('poi-type').value };
+  if (!editingPoi) body.by = myName();
+  const res = await fetch(editingPoi ? '/api/pois/' + editingPoi : '/api/pois', {
+    method: editingPoi ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { alert(data.error || 'Could not save the place'); return; }
+  resetPoiForm();
+  lastPoisJson = '';
+  await refreshPois();
+  $('poi-title').focus();
+});
+
+refreshPois();
+setInterval(refreshPois, 4000);
+
+// ---------- chat ----------
+let lastMsgId = 0;
+let lastMsg = null;
+let polling = false;
+
+try { $('nick').value = localStorage.getItem('nick') || ''; } catch {}
+$('nick').addEventListener('input', () => {
+  $('nick').classList.remove('need');
+  try { localStorage.setItem('nick', $('nick').value.trim()); } catch {}
+});
+
+function nameColor(name) {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.codePointAt(0)) % 360;
+  return `hsl(${h}, 70%, 68%)`;
+}
+
+function addMessage(m) {
+  const box = $('messages');
+  const day = new Date(m.time).toDateString();
+  if (!lastMsg || new Date(lastMsg.time).toDateString() !== day) {
+    box.append(el('div', { className: 'day', textContent: new Date(m.time).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' }) }));
+    lastMsg = null;
+  }
+  // Consecutive messages from the same person within 5 minutes share one header.
+  const cont = lastMsg && lastMsg.name === m.name && m.time - lastMsg.time < 5 * 60 * 1000;
+  const node = el('div', { className: 'msg' + (cont ? ' cont' : '') });
+  if (!cont) {
+    const name = el('span', { className: 'msg-name', textContent: m.name });
+    name.style.color = nameColor(m.name);
+    node.append(el('div', { className: 'msg-top' }, name,
+      el('span', { className: 'msg-time', textContent: new Date(m.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })));
+  }
+  node.append(el('div', { className: 'msg-text', textContent: m.text }));
+  box.append(node);
+  lastMsg = m;
+}
+
+let pollAgain = false;
+async function pollChat() {
+  if (polling) { pollAgain = true; return; }
+  polling = true;
+  const firstLoad = lastMsgId === 0;
+  try {
+    const res = await fetch('/api/chat?after=' + lastMsgId, { cache: 'no-store' });
+    const { messages } = await res.json();
+    if (messages.length) {
+      const box = $('messages');
+      const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+      for (const m of messages) addMessage(m);
+      lastMsgId = messages[messages.length - 1].id;
+      if (atBottom || firstLoad) box.scrollTop = box.scrollHeight;
+    } else if (firstLoad && !$('messages').children.length) {
+      $('messages').append(el('div', { className: 'day', id: 'chat-empty', textContent: 'No messages yet. Say hi!' }));
+    }
+  } catch { /* server unreachable, try again next tick */ }
+  polling = false;
+  if (pollAgain) { pollAgain = false; pollChat(); }
+}
+
+$('chat-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = $('nick').value.trim();
+  const text = $('chat-text').value.trim();
+  if (!name) { $('nick').classList.add('need'); $('nick').focus(); return; }
+  if (!text) return;
+  $('chat-text').value = '';
+  try {
+    const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, text }) });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Message could not be sent.');
+    $('chat-empty')?.remove();
+    $('messages').scrollTop = $('messages').scrollHeight; // so the new message auto-scrolls into view
+    pollChat();
+  } catch (err) {
+    $('chat-text').value = text;
+    alert(err instanceof TypeError ? 'Message could not be sent. Is the server still running?' : err.message);
+  }
+});
+
+pollChat();
+setInterval(pollChat, 1500);
+
+// ---------- uploads ----------
+// A job is one file, or one whole folder (uploaded file by file, shown as a single progress bar).
+const pending = [];
+let busy = false;
+
+function addJob(job) {
+  job.info = el('span', { className: 'job-info', textContent: job.prepare ? 'Reading folder...' : 'Waiting...' });
+  job.fill = el('div');
+  job.cancel = el('button', { className: 'ghost', textContent: 'Cancel' });
+  job.label = el('span', { className: 'job-name', textContent: (job.kind === 'folder' ? '📁 ' : '') + job.name, title: job.name });
+  job.node = el('div', { className: 'job' },
+    el('div', { className: 'job-top' }, job.label, el('div', { className: 'actions' }, job.info, job.cancel)),
+    el('div', { className: 'bar' }, job.fill));
+  job.active = new Set();
+  job.cancel.onclick = () => {
+    job.cancelled = true;
+    for (const x of job.active) x.abort();
+    if (!job.started) {
+      finish(job, 'error', 'Cancelled');
+      if (job.onFail) job.onFail();
+    }
+  };
+  (job.container || $('queue')).prepend(job.node);
+  pending.push(job);
+  next();
+}
+
+function addFiles(list, dir = cwd.join('/')) {
+  for (const file of list) addJob({ kind: 'file', name: file.name, dir, items: [{ file, rel: '' }] });
+}
+
+function addFolder(name, prepare, dir = cwd.join('/')) {
+  addJob({ kind: 'folder', name, dir, prepare });
+}
+
+function finish(job, state, text) {
+  job.node.classList.add(state);
+  job.info.textContent = text;
+  job.cancel.textContent = 'Dismiss';
+  job.cancel.onclick = () => job.node.remove();
+  if (state === 'done') setTimeout(() => job.node.remove(), 8000);
+}
+
+function putFile(file, dir, onProgress) {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise((resolve, reject) => {
+    xhr.upload.onprogress = (e) => onProgress(e.loaded);
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status === 201) resolve(data);
+      else reject(new Error(data.error || 'Upload failed'));
+    };
+    xhr.onerror = () => reject(new Error('Connection lost'));
+    xhr.onabort = () => reject(new Error('Cancelled'));
+  });
+  xhr.open('PUT', `/api/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name)}`);
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.send(file);
+  return { xhr, promise };
+}
+
+async function runJob(job) {
+  if (job.prepare) job.items = await job.prepare();
+  if (job.cancelled) throw new Error('Cancelled');
+  const items = job.items;
+  const totalBytes = items.reduce((s, i) => s + i.file.size, 0);
+  let dir = job.dir;
+
+  if (job.kind === 'folder') {
+    const res = await fetch(`/api/folder?path=${encodeURIComponent(job.dir)}&name=${encodeURIComponent(job.name)}`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not create the folder');
+    job.token = data.token;
+    dir = data.path;
+    job.savedAs = dir.split('/').pop();
+  }
+
+  const started = performance.now();
+  const live = new Map(); // xhr -> bytes sent so far
+  let doneBytes = 0;
+  let filesDone = 0;
+  const update = () => {
+    const sent = doneBytes + [...live.values()].reduce((a, b) => a + b, 0);
+    const speed = sent / Math.max((performance.now() - started) / 1000, 0.001);
+    const pct = totalBytes ? sent / totalBytes * 100 : (filesDone / Math.max(items.length, 1)) * 100;
+    job.fill.style.width = pct + '%';
+    const parts = [pct.toFixed(0) + '%'];
+    if (job.kind !== 'file') parts.push(`${filesDone}/${items.length} files`);
+    if (sent) parts.push(fmtSize(speed) + '/s', fmtTime((totalBytes - sent) / speed) + ' left');
+    job.info.textContent = parts.join(' · ');
+  };
+  update();
+
+  // Several files at once: folders often hold thousands of small files.
+  let nextItem = 0;
+  const worker = async () => {
+    while (nextItem < items.length && !job.cancelled && !job.error) {
+      const item = items[nextItem++];
+      const target = item.rel ? dir + '/' + item.rel : dir;
+      for (let attempt = 0; ; attempt++) {
+        let up;
+        up = putFile(item.file, target, (loaded) => { live.set(up.xhr, loaded); update(); });
+        job.active.add(up.xhr);
+        try {
+          const data = await up.promise;
+          if (job.kind === 'file') job.savedAs = data.name;
+          break;
+        } catch (e) {
+          if (job.cancelled || attempt >= 1) {
+            if (!job.error) job.error = e;
+            for (const x of job.active) if (x !== up.xhr) x.abort();
+            return;
+          }
+        } finally {
+          job.active.delete(up.xhr);
+          live.delete(up.xhr);
+        }
+      }
+      doneBytes += item.file.size;
+      filesDone++;
+      update();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(job.kind === 'file' ? 1 : 4, items.length) }, worker));
+  if (job.cancelled) throw new Error('Cancelled');
+  if (job.error) throw new Error(`${job.error.message}${job.kind !== 'file' ? ` (after ${filesDone} of ${items.length} files)` : ''}`);
+}
+
+async function next() {
+  if (busy) return;
+  const job = pending.shift();
+  if (!job) return;
+  if (job.cancelled) return next();
+  busy = true;
+  job.started = true;
+  job.info.textContent = 'Starting...';
+  try {
+    await runJob(job);
+    if (job.onDone) await job.onDone();
+    job.fill.style.width = '100%';
+    const n = job.items.length;
+    let text = job.kind !== 'file' ? `Done · ${n} file${n === 1 ? '' : 's'}` : 'Done';
+    if (job.savedAs && job.savedAs !== job.name) text += ` (saved as ${job.savedAs})`;
+    finish(job, 'done', text);
+  } catch (e) {
+    // A cancelled folder is removed again so nobody downloads half of it.
+    if (job.cancelled && job.token) fetch('/api/folder/' + job.token, { method: 'DELETE' }).catch(() => {});
+    if (job.onFail) job.onFail(); // e.g. drop a half-uploaded installer version
+    finish(job, 'error', e.message);
+  }
+  lastJson = '';
+  refresh();
+  busy = false;
+  next();
+}
+
+window.addEventListener('beforeunload', (e) => {
+  if (busy || pending.length) { e.preventDefault(); e.returnValue = ''; }
+});
+
+$('pick').onclick = () => $('input').click();
+$('input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
+
+// "Choose folder": every file carries its path, e.g. "MyMod/textures/a.png".
+$('pick-folder').onclick = () => $('input-folder').click();
+$('input-folder').onchange = (e) => {
+  const groups = new Map();
+  for (const file of e.target.files) {
+    const parts = (file.webkitRelativePath || file.name).split('/');
+    const top = parts.length > 1 ? parts[0] : '';
+    if (!groups.has(top)) groups.set(top, []);
+    groups.get(top).push({ file, rel: parts.slice(1, -1).join('/') });
+  }
+  for (const [top, items] of groups) {
+    if (top) addFolder(top, async () => items);
+    else addFiles(items.map(i => i.file));
+  }
+  e.target.value = '';
+};
+
+// Walk a dropped folder. readEntries returns at most 100 entries per call, so keep calling until it's empty.
+async function readFolder(dirEntry, rel, out) {
+  const reader = dirEntry.createReader();
+  for (;;) {
+    const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    if (!batch.length) break;
+    for (const entry of batch) {
+      if (entry.isFile) out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), rel });
+      else if (entry.isDirectory) await readFolder(entry, rel ? rel + '/' + entry.name : entry.name, out);
+    }
+  }
+  return out;
+}
+
+// Drop anywhere on the page.
+let dragDepth = 0;
+const drop = $('drop');
+window.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; drop.classList.add('over'); });
+window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; drop.classList.remove('over'); } });
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  drop.classList.remove('over');
+  if (!e.dataTransfer.files.length) return; // e.g. dragged text
+  // Entries must be read now: the drop data is gone once this handler returns.
+  const entries = [...(e.dataTransfer.items || [])].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!$('installer-modal').hidden) return pickReleaseFromDrop(entries, e.dataTransfer.files); // installer panel is open
+  if (!entries.length) return addFiles(e.dataTransfer.files);
+  const loose = [];
+  for (const entry of entries) {
+    if (entry.isDirectory) addFolder(entry.name, () => readFolder(entry, '', []));
+    else loose.push(entry);
+  }
+  if (loose.length) {
+    Promise.all(loose.map(en => new Promise((res, rej) => en.file(res, rej)))).then(addFiles);
+  }
+});
+
+// ---------- mods installer: banner + upload panel ----------
+let releases = [];
+let releaseTags = [];
+let canDeleteReleases = false;
+let lastReleasesJson = '';
+let relItems = []; // [{ file, rel }] chosen for the next version upload
+
+const vLabel = (v) => (/^\d/.test(v) ? 'v' + v : v);
+const tagEls = (tags) => tags.map(t => el('span', { className: 'rtag ' + t, textContent: t }));
+
+async function refreshReleases() {
+  try {
+    const res = await fetch('/api/releases', { cache: 'no-store' });
+    const text = await res.text();
+    if (text === lastReleasesJson) return;
+    lastReleasesJson = text;
+    const data = JSON.parse(text);
+    releases = data.releases;
+    canDeleteReleases = data.canDelete;
+    if (!releaseTags.length) {
+      releaseTags = data.tags;
+      for (const t of releaseTags) {
+        $('rel-tags').append(el('label', {}, el('input', { type: 'checkbox', value: t, checked: t === 'Recent' }), el('span', { className: 'rtag ' + t, textContent: t })));
+      }
+    }
+    renderBanner();
+    renderReleaseList();
+  } catch { lastReleasesJson = ''; }
+}
+
+// Main button: the version tagged Recent (or simply the newest). Second button: the newest Stable, if that's a different one.
+function renderBanner() {
+  const ready = releases.filter(r => r.status === 'ready').sort((a, b) => b.added - a.added);
+  const banner = $('banner');
+  const title = $('banner-title');
+  const actions = $('banner-actions');
+  title.replaceChildren();
+  actions.replaceChildren();
+  banner.classList.toggle('none', !ready.length);
+  if (!ready.length) {
+    title.textContent = 'Mods installer: nothing uploaded yet';
+    $('banner-sub').textContent = '';
+    return;
+  }
+  const main = ready.find(r => r.tags.includes('Recent')) || ready[0];
+  const stable = ready.find(r => r.tags.includes('Stable'));
+  title.append('Mods installer ', el('span', { className: 'ver', textContent: vLabel(main.version) }), ...tagEls(main.tags));
+  const sub = [`updated ${fmtDate(main.added)}`];
+  if (main.by) sub.push(`by ${main.by}`);
+  sub.push(`${main.count} file${main.count === 1 ? '' : 's'}, ${fmtSize(main.size)}`);
+  if (main.note) sub.push(main.note.split('\n')[0]);
+  $('banner-sub').textContent = sub.join(' · ');
+  $('banner-sub').title = main.note || '';
+
+  actions.append(el('a', { className: 'btn big', href: main.download, download: main.downloadName, textContent: `Download ${vLabel(main.version)}` }));
+  if (stable && stable !== main) {
+    actions.append(el('a', { className: 'btn secondary', href: stable.download, download: stable.downloadName, textContent: `Stable ${vLabel(stable.version)}` }));
+  }
+  actions.append(el('a', { className: 'all', textContent: `All versions (${ready.length})`, onclick: () => { showTab('files'); openFolder(['Mods Installer']); } }));
+}
+
+function renderReleaseList() {
+  if ($('installer-modal').hidden) return;
+  const box = $('rel-list');
+  box.replaceChildren();
+  const list = [...releases].sort((a, b) => b.added - a.added);
+  if (!list.length) {
+    box.append(el('div', { className: 'empty', textContent: 'No versions yet.' }));
+    return;
+  }
+  for (const r of list) {
+    // Tags are toggled by clicking them.
+    const tags = el('span', { className: 'rel-tags' });
+    for (const t of releaseTags) {
+      const on = r.tags.includes(t);
+      tags.append(el('button', {
+        type: 'button', className: 'rtag ' + t + (on ? '' : ' off'), textContent: t, title: on ? `Remove ${t}` : `Tag as ${t}`,
+        onclick: () => patchRelease(r, { tags: on ? r.tags.filter(x => x !== t) : [...r.tags, t] }),
+      }));
+    }
+    const status = r.status === 'ready' ? '' : r.status === 'uploading' ? ' · uploading...' : ' · INCOMPLETE (upload was interrupted)';
+    const meta = `${r.count} file${r.count === 1 ? '' : 's'} · ${fmtSize(r.size)} · ${fmtDate(r.added)}${r.by ? ' · by ' + r.by : ''}${status}${r.note ? '\n' + r.note : ''}`;
+    const actions = el('div', { className: 'actions' });
+    if (r.status === 'ready') actions.append(el('a', { className: 'btn', href: r.download, download: r.downloadName, textContent: 'Download' }));
+    actions.append(el('button', { className: 'ghost', type: 'button', textContent: 'Edit note', onclick: () => {
+      const note = prompt('What changed in this version?', r.note || '');
+      if (note !== null) patchRelease(r, { note });
+    } }));
+    if (canDeleteReleases) actions.append(el('button', { className: 'ghost danger', type: 'button', textContent: 'Delete', onclick: () => deleteRelease(r) }));
+    box.append(el('div', { className: 'file rel-row' },
+      el('div', { className: 'file-main' },
+        el('div', { className: 'file-name' }, el('b', { textContent: vLabel(r.version) }), tags),
+        el('div', { className: 'file-meta', textContent: meta })),
+      actions));
+  }
+}
+
+async function patchRelease(r, changes) {
+  const res = await fetch('/api/releases/' + r.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Could not save');
+  lastReleasesJson = '';
+  refreshReleases();
+}
+
+async function deleteRelease(r) {
+  if (!confirm(`Delete version ${vLabel(r.version)} and its files for everyone?`)) return;
+  const res = await fetch('/api/releases/' + r.id, { method: 'DELETE' });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error || 'Delete failed');
+  lastReleasesJson = '';
+  refreshReleases();
+  lastJson = '';
+  refresh();
+}
+
+function openInstallerPanel() {
+  $('installer-modal').hidden = false;
+  lastReleasesJson = '';
+  refreshReleases();
+  $('rel-version').focus();
+}
+function closeInstallerPanel() { $('installer-modal').hidden = true; }
+$('open-installer').onclick = openInstallerPanel;
+$('installer-close').onclick = closeInstallerPanel;
+$('installer-modal').addEventListener('click', (e) => { if (e.target === $('installer-modal')) closeInstallerPanel(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('installer-modal').hidden) closeInstallerPanel(); });
+if (location.hash === '#installer') openInstallerPanel(); // bookmarkable: http://<host>:8080/#installer
+
+function setRelItems(items, label) {
+  relItems = items;
+  const size = items.reduce((s, i) => s + i.file.size, 0);
+  $('rel-picked').className = items.length ? 'ready' : '';
+  $('rel-picked').textContent = items.length
+    ? `${label} · ${items.length} file${items.length === 1 ? '' : 's'}, ${fmtSize(size)}`
+    : 'Nothing chosen yet. You can also drop the folder onto this window.';
+}
+
+// The chosen folder's contents go straight into the version folder (its own name is dropped).
+$('rel-pick-folder').onclick = () => $('rel-input-folder').click();
+$('rel-input-folder').onchange = (e) => {
+  const files = [...e.target.files];
+  if (files.length) {
+    const top = (files[0].webkitRelativePath || '').split('/')[0];
+    setRelItems(files.map(file => ({ file, rel: (file.webkitRelativePath || file.name).split('/').slice(1, -1).join('/') })), '📁 ' + (top || 'folder'));
+  }
+  e.target.value = '';
+};
+$('rel-pick-files').onclick = () => $('rel-input-files').click();
+$('rel-input-files').onchange = (e) => {
+  const files = [...e.target.files];
+  if (files.length) setRelItems(files.map(file => ({ file, rel: '' })), files.length === 1 ? files[0].name : 'Files');
+  e.target.value = '';
+};
+
+async function pickReleaseFromDrop(entries, fileList) {
+  if (!entries.length) return setRelItems([...fileList].map(file => ({ file, rel: '' })), 'Files');
+  $('rel-picked').className = '';
+  $('rel-picked').textContent = 'Reading...';
+  const items = [];
+  // One folder dropped: its contents become the version. Anything else keeps its own names.
+  if (entries.length === 1 && entries[0].isDirectory) {
+    await readFolder(entries[0], '', items);
+    return setRelItems(items, '📁 ' + entries[0].name);
+  }
+  for (const en of entries) {
+    if (en.isDirectory) await readFolder(en, en.name, items);
+    else items.push({ file: await new Promise((res, rej) => en.file(res, rej)), rel: '' });
+  }
+  setRelItems(items, `${entries.length} items`);
+}
+
+$('rel-version').addEventListener('input', () => $('rel-version').classList.remove('need'));
+$('release-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('rel-status');
+  status.className = 'mod-status';
+  status.textContent = '';
+  const version = $('rel-version').value.trim();
+  if (!version) { $('rel-version').classList.add('need'); $('rel-version').focus(); return; }
+  if (!relItems.length) { status.className = 'mod-status warn'; status.textContent = 'Choose the installer folder or files first.'; return; }
+
+  const tags = [...$('rel-tags').querySelectorAll('input:checked')].map(i => i.value);
+  const res = await fetch('/api/releases', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version, tags, note: $('rel-note').value, by: myName() }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { status.className = 'mod-status warn'; status.textContent = data.error || 'Could not start the upload'; return; }
+
+  const { release, token, path } = data;
+  addJob({
+    kind: 'release', name: `Mods installer ${vLabel(release.version)}`, dir: path, items: relItems, container: $('rel-queue'),
+    onDone: async () => {
+      const r = await fetch(`/api/releases/${release.id}/done?token=${token}`, { method: 'POST' });
+      if (!r.ok) throw new Error('Could not publish the version');
+      lastReleasesJson = '';
+      refreshReleases();
+    },
+    onFail: () => {
+      fetch(`/api/releases/${release.id}?token=${token}`, { method: 'DELETE' }).catch(() => {}).then(() => { lastReleasesJson = ''; refreshReleases(); });
+    },
+  });
+  $('rel-version').value = $('rel-note').value = '';
+  setRelItems([], '');
+  lastReleasesJson = '';
+  refreshReleases();
+});
+
+// Keep the chat panel below the pinned banner (the banner's height changes with its text).
+new ResizeObserver(() => document.documentElement.style.setProperty('--banner-h', $('banner').offsetHeight + 'px')).observe($('banner'));
+
+refreshReleases();
+setInterval(refreshReleases, 5000);
+
+// Reopen the tab this person had open last time.
+let savedTab = 'files';
+try { savedTab = localStorage.getItem('tab') || 'files'; } catch {}
+if (savedTab === 'mods') savedTab = 'links'; // old single Mods tab
+showTab(TABS.includes(savedTab) ? savedTab : 'files');
+</script>
+</body>
+</html>

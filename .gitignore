@@ -1,0 +1,8 @@
+# Everything people create while the server runs stays on the host PC, never in the repo.
+shared/
+incoming/
+chat.jsonl
+mods.json
+pois.json
+releases.json
+*.tmp
