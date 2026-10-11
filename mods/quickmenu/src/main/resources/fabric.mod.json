@@ -12,6 +12,12 @@
 	},
 	"license": "MIT",
 	"environment": "*",
+	"mixins": [
+		{
+			"config": "lanquick.client.mixins.json",
+			"environment": "client"
+		}
+	],
 	"entrypoints": {
 		"main": [
 			"lan.quick.LanQuick"

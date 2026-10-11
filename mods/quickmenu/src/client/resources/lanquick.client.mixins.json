@@ -1,0 +1,11 @@
+{
+	"required": true,
+	"package": "lan.quick.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"ContainerScreenAccessor"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

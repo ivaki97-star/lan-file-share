@@ -20,7 +20,10 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.core.registries.BuiltInRegistries;
+import java.util.ArrayList;
+import java.util.Comparator;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.gamerules.GameRules;
@@ -43,11 +46,10 @@ public class QuickCommands {
 		quick.then(Commands.literal("night").executes(c -> vanilla(c, "time set night", "It is night.")));
 		quick.then(Commands.literal("clear").executes(c -> vanilla(c, "weather clear", "The sky is clear.")));
 		quick.then(Commands.literal("rain").executes(c -> vanilla(c, "weather rain", "Rain.")));
-		quick.then(Commands.literal("animals")
-			.then(Commands.literal("place").then(Commands.argument("place", StringArgumentType.greedyString()).suggests(QuickCommands::suggestPlaces).executes(QuickCommands::animalsToPlace)))
-			.then(Commands.argument("position", Vec3Argument.vec3())
-				.executes(c -> animals(c, Vec3Argument.getVec3(c, "position"), LanQuick.config.animalsRadius))
-				.then(Commands.argument("radius", IntegerArgumentType.integer(1, 128)).executes(c -> animals(c, Vec3Argument.getVec3(c, "position"), IntegerArgumentType.getInteger(c, "radius"))))));
+		quick.then(Commands.literal("bring")
+			.then(Commands.argument("animal", StringArgumentType.word()).suggests(QuickCommands::suggestAnimals)
+				.executes(c -> bring(c, StringArgumentType.getString(c, "animal"), 1))
+				.then(Commands.argument("count", IntegerArgumentType.integer(0, 64)).executes(c -> bring(c, StringArgumentType.getString(c, "animal"), IntegerArgumentType.getInteger(c, "count"))))));
 		quick.then(Commands.literal("back").executes(QuickCommands::back));
 		quick.then(Commands.literal("spawn").executes(QuickCommands::spawn));
 		quick.then(Commands.literal("home").executes(QuickCommands::home));
@@ -144,34 +146,49 @@ public class QuickCommands {
 		return now ? 1 : 0;
 	}
 
-	// ---------- animals ----------
+	// ---------- animals: bring the nearest of a kind to me ----------
 
-	private static int animalsToPlace(CommandContext<CommandSourceStack> c) throws CommandSyntaxException {
-		String name = StringArgumentType.getString(c, "place");
-		Place p = LanQuick.places.find(name);
-		if (p == null) {
-			c.getSource().sendFailure(Component.literal("No place called \"" + name + "\"."));
-			return 0;
-		}
-		return animals(c, new Vec3(p.x() + 0.5, p.y(), p.z() + 0.5), LanQuick.config.animalsRadius);
+	private static java.util.concurrent.CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestAnimals(CommandContext<CommandSourceStack> c, com.mojang.brigadier.suggestion.SuggestionsBuilder b) {
+		return SharedSuggestionProvider.suggest(Animals.ALL.stream().map(Animals.Kind::id), b);
 	}
 
-	/** Every animal within radius blocks of you goes to the target, spread out a little. Same dimension only. */
-	private static int animals(CommandContext<CommandSourceStack> c, Vec3 target, int radius) throws CommandSyntaxException {
+	/**
+	 * /quick bring panda      -> the nearest panda comes to you
+	 * /quick bring cow 5      -> the five nearest cows
+	 * /quick bring wolf 0     -> every wolf within Animals.ALL_RADIUS blocks
+	 */
+	private static int bring(CommandContext<CommandSourceStack> c, String id, int count) throws CommandSyntaxException {
 		ServerPlayer player = c.getSource().getPlayerOrException();
+		Animals.Kind kind = Animals.find(id);
+		Identifier typeId = Identifier.withDefaultNamespace(kind != null ? kind.id() : id.toLowerCase());
+		var type = BuiltInRegistries.ENTITY_TYPE.getOptional(typeId);
+		if (type.isEmpty()) {
+			c.getSource().sendFailure(Component.literal("No creature called \"" + id + "\"."));
+			return 0;
+		}
 		ServerLevel level = player.level();
+		int radius = count == 0 ? Animals.ALL_RADIUS : Animals.SEARCH_RADIUS;
 		double r2 = (double) radius * radius;
-		List<? extends Animal> found = level.getEntities(EntityTypeTest.forClass(Animal.class), a -> a.isAlive() && a.distanceToSqr(player) <= r2);
+		List<? extends Mob> found = level.getEntities(EntityTypeTest.forClass(Mob.class), m -> m.getType() == type.get() && m.isAlive() && m.distanceToSqr(player) <= r2);
+		List<Mob> sorted = new ArrayList<>(found);
+		sorted.sort(Comparator.comparingDouble(m -> m.distanceToSqr(player)));
+		int wanted = count == 0 ? sorted.size() : Math.min(count, sorted.size());
+		Vec3 at = player.position();
 		int n = 0;
-		for (Animal a : found) {
-			double ox = ((n % 3) - 1) * 1.5, oz = (((n / 3) % 3) - 1) * 1.5;
-			a.teleportTo(level, target.x + ox, target.y, target.z + oz, Set.of(), a.getYRot(), a.getXRot(), false);
+		for (Mob m : sorted.subList(0, wanted)) {
+			double a = n * 2.39996; // golden angle: spread them in a loose spiral around the player
+			double d = 1.5 + 0.4 * n;
+			m.teleportTo(level, at.x + Math.cos(a) * d, at.y, at.z + Math.sin(a) * d, Set.of(), m.getYRot(), m.getXRot(), false);
 			n++;
 		}
-		int count = n;
-		if (count == 0) c.getSource().sendFailure(Component.literal("No animals within " + radius + " blocks of you."));
-		else c.getSource().sendSuccess(() -> Component.literal(String.format("Moved %d animal%s to %d %d %d.", count, count == 1 ? "" : "s", (int) Math.floor(target.x), (int) Math.floor(target.y), (int) Math.floor(target.z))), false);
-		return count;
+		String name = kind != null ? kind.label() : type.get().getDescription().getString();
+		if (n == 0) {
+			c.getSource().sendFailure(Component.literal("No " + name.toLowerCase() + " within " + radius + " blocks."));
+			return 0;
+		}
+		int moved = n;
+		c.getSource().sendSuccess(() -> Component.literal(moved == 1 ? name + " is here." : moved + " x " + name.toLowerCase() + " are here."), false);
+		return moved;
 	}
 
 	// ---------- me ----------
