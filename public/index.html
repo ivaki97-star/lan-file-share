@@ -500,6 +500,9 @@
       <label class="full">Link
         <input class="text-in" id="mod-url" placeholder="Paste the mod's page link, e.g. https://www.nexusmods.com/...">
       </label>
+      <label class="full">...or upload the mod file itself (a .jar, or a .zip): it goes into Files / Mods and the link fills in
+        <input type="file" id="mod-file" accept=".jar,.zip,application/java-archive,application/zip">
+      </label>
       <label>Name
         <input class="text-in" id="mod-name" maxlength="150" placeholder="Filled in from the site">
       </label>
@@ -909,7 +912,7 @@ function renderMods() {
     name.append(m.url ? el('a', { href: m.url, target: '_blank', rel: 'noopener noreferrer', textContent: m.name }) : m.name);
 
     const meta = [];
-    if (m.url) meta.push(new URL(m.url).hostname.replace(/^www\./, ''));
+    if (m.url) meta.push(new URL(m.url).host === location.host ? 'uploaded here' : new URL(m.url).hostname.replace(/^www\./, ''));
     if (m.note) meta.push(m.note);
     meta.push('added ' + (m.by ? `by ${m.by} ` : '') + fmtDate(m.added));
     const metaEl = el('div', { className: 'file-meta', textContent: meta.join(' · ') });
@@ -991,6 +994,37 @@ async function lookupTitle() {
   } catch {
     if (id === titleRequest) { status.className = 'mod-status warn'; status.textContent = 'Couldn\'t read the site. Type the name.'; }
   }
+}
+
+// A friend's own mod: the file goes to Files/Mods, the direct link becomes the suggestion's link, the admin publishes it.
+$('mod-file').addEventListener('change', async () => {
+  const file = $('mod-file').files[0];
+  if (!file) return;
+  const status = $('mod-status');
+  status.className = 'mod-status';
+  if (!/\.(jar|zip)$/i.test(file.name)) { status.className = 'mod-status warn'; status.textContent = 'Mods are .jar files (or a .zip).'; $('mod-file').value = ''; return; }
+  status.textContent = `Uploading ${file.name}...`;
+  try {
+    const { promise } = putFile(file, 'Mods', (loaded) => { status.textContent = `Uploading ${file.name}... ${Math.round(loaded / file.size * 100)}%`; });
+    const data = await promise;
+    titleRequest++; // no title lookup for our own link
+    $('mod-url').value = `${location.origin}/files/Mods/${encodeURIComponent(data.name)}`;
+    if (!nameTyped) $('mod-name').value = nameFromFile(file.name);
+    status.textContent = `Uploaded to Files / Mods as ${data.name}. Check the name, add a note, then Add mod.`;
+    lastJson = '';
+  } catch (err) {
+    status.className = 'mod-status warn';
+    status.textContent = err.message;
+  }
+  $('mod-file').value = '';
+});
+
+// "cool-textures-1.2.0+mc26.3.jar" -> "Cool Textures"
+function nameFromFile(fileName) {
+  let stem = fileName.replace(/\.(jar|zip)$/i, '');
+  const m = /^(.+?)[-_+ ]v?\d/.exec(stem);
+  if (m) stem = m[1];
+  return stem.replace(/[-_+.]+/g, ' ').trim().replace(/\b\w/g, (ch) => ch.toUpperCase()).slice(0, 150);
 }
 
 $('mod-form').addEventListener('submit', async (e) => {
