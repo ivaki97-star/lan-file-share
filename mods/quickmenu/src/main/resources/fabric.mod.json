@@ -1,0 +1,32 @@
+{
+	"schemaVersion": 1,
+	"id": "lanquick",
+	"version": "${version}",
+	"name": "LAN Quick Menu",
+	"description": "Extra tabs next to the inventory: teleport to the places from the LAN File Share site, set day, clear the weather, boat speed, move animals, go back to where you died, home, spawn.",
+	"authors": [
+		"LAN party"
+	],
+	"contact": {
+		"sources": "https://github.com/ivaki97-star/lan-file-share"
+	},
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"lan.quick.LanQuick"
+		],
+		"client": [
+			"lan.quick.client.LanQuickClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"boatfly": "*"
+	}
+}

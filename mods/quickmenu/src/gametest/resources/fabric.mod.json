@@ -1,0 +1,15 @@
+{
+	"schemaVersion": 1,
+	"id": "lanquick-test",
+	"version": "1.0.0",
+	"name": "LAN Quick Menu test",
+	"environment": "*",
+	"entrypoints": {
+		"fabric-client-gametest": [
+			"lan.quick.test.QuickMenuTest"
+		]
+	},
+	"depends": {
+		"lanquick": "*"
+	}
+}

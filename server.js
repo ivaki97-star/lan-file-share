@@ -1363,6 +1363,28 @@ async function fetchModJar(resolved, dir) {
   return { file, sha256: crypto.createHash('sha256').update(buf).digest('hex'), size: buf.length };
 }
 
+// A suggestion that links to a jar in this site's own Files (/files/Mods/x.jar) is copied from disk, no HTTP needed:
+// the jar was uploaded here precisely so the pack can carry it. Returns the sharedPath entry or null for other links.
+function ownFileLink(req, link) {
+  let u;
+  try { u = new URL(link); } catch { return null; }
+  const ours = [siteBase(req), `http://${req.headers.host || ''}`, `https://${req.headers.host || ''}`].map((b) => { try { return new URL(b).host.toLowerCase(); } catch { return ''; } });
+  if (!ours.includes(u.host.toLowerCase()) || !u.pathname.startsWith('/files/')) return null;
+  let segs;
+  try { segs = u.pathname.slice('/files/'.length).split('/').filter(Boolean).map(decodeURIComponent); } catch { return null; }
+  const entry = sharedPath(segs);
+  if (!entry || !entry.stat.isFile() || !/\.jar$/i.test(entry.name)) return null;
+  return entry;
+}
+
+function copyModJar(entry, dir) {
+  const buf = fs.readFileSync(entry.full);
+  if (buf.length < 1000 || buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error('the file in Files is not a jar');
+  const file = cleanName(entry.name);
+  fs.writeFileSync(path.join(dir, file), buf);
+  return { file, sha256: crypto.createHash('sha256').update(buf).digest('hex'), size: buf.length };
+}
+
 let publishing = false;
 // POST /api/mods/publish { ids: [...], note? }  -> a new installer version with those suggestions' jars bundled.
 function publishSuggestions(req, res) {
@@ -1383,8 +1405,9 @@ function publishSuggestions(req, res) {
       const added = [], failed = [];
       for (const m of chosen) {
         try {
-          const resolved = await resolveModLink(m.url, mcVersion);
-          const got = await fetchModJar(resolved, modsDir);
+          const own = ownFileLink(req, m.url);
+          const resolved = own ? { file: own.name, url: m.url, page: m.url, version: '' } : await resolveModLink(m.url, mcVersion);
+          const got = own ? copyModJar(own, modsDir) : await fetchModJar(resolved, modsDir);
           const entry = { name: m.name, match: matchPatternFor(got.file), file: got.file, localFile: `mods/${got.file}`, url: resolved.url, sha256: got.sha256, page: resolved.page };
           const key = projectKey(resolved.page);
           const i = pack.mods.findIndex((x) => x && ((key && x.page && projectKey(x.page) === key) || (x.match && globToRegex(x.match).test(got.file))));

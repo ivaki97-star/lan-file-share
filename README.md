@@ -38,6 +38,21 @@ clicks **Publish selected to the server pack**:
    every suggestion whose jar is on the server moves to **Installed on server** with the version it arrived in.
 4. Players run the installer again and get the same jars from the version zip.
 
+## Quick menu mod (mods/quickmenu)
+
+A small Fabric mod for the server and every player: extra tabs to the right of the survival inventory (press E).
+Places lists the site's Places tab and teleports you there; Weather sets day, night, clear sky or rain; Boat sets the
+Boat Fly speed (normal, 20, 50, 100); Animals sends the animals near you to a place or to typed coordinates; Me has back
+to where you died, home / set home, spawn, share coords, mark this spot (lands on the site's Places tab) and keep
+inventory on/off. Everything is also a command: `/quick places`, `/quick tp <place>`, `/quick day`, `/quick animals
+<x> <y> <z> [radius]`, `/quick back`, `/quick mark <name>`, ... By default everyone may use it; `everyoneCanUse: false`
+in the server's `config/lanquick.json` limits it to ops. The same file holds `siteUrl` and `adminToken` so the server
+can read and add places on the site.
+
+Build: `cd mods/quickmenu && ./gradlew build` with Java 25; the jar lands in `build/libs/`. Ship it like any other
+mod: upload the jar to the site's Files (a Mods folder), paste its link as a mod suggestion, publish the suggestion to
+the server pack, run `deploy-server.cmd`, and players run the installer again.
+
 ## Hosting on a real server
 
 Everything is switched by a `.env` file next to `server.js` (see `.env.example`). Without one the site runs as the LAN

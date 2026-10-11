@@ -60,6 +60,15 @@ What exists, why, and what is next. Newest work at the bottom of each section. D
 - Version zips always carry `tools/Install-MinecraftMods.cmd` and a model feed pointing at the serving site, so a
   version uploaded with an old installer or made on the LAN PC still deploys in server mode.
 
+### Oct 11 — quick menu mod
+- `mods/quickmenu`: Fabric 26.3 mod "LAN Quick Menu" (id `lanquick`, Mojang mappings, Java 25). Server side: `/quick`
+  commands (places from the site's Places tab via `/api/pois` with the admin token, tp, day/night/clear/rain run as the
+  server so nobody needs op, animals to a place or coordinates, back to death, home, spawn, mark a spot onto the site,
+  keep inventory, coords), config `config/lanquick.json`. Client side: tabs next to the inventory (Fabric screen API),
+  every button sends a command; Boat tab sends Boat Fly's client command `/boatspeed`.
+- Publishing a suggestion whose link is a jar in this site's own Files copies the file from disk, so uploaded mods ship
+  through the pack without a second download.
+
 ## Next steps
 
 1. Deploy the site following `DEPLOYMENT.md`; fill `.env`; import the data; register the first (admin) account.
