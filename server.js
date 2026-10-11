@@ -38,6 +38,7 @@ const SECRET_FILE = path.join(DATA_DIR, 'secret.key'); // signs session cookies,
 const DATA_FILES = ['chat.jsonl', 'mods.json', 'pois.json', 'releases.json', 'models.json', 'users.json', 'deploys.json'];
 const MODELS_DIR = 'Models'; // folder inside shared/ with one subfolder per Easy Model Entities model
 const INSTALLER_DIR = 'Mods Installer'; // folder inside shared/ that holds one subfolder per installer version
+const SHIPPED_INSTALLER = path.join(__dirname, 'tools', 'Install-MinecraftMods.cmd'); // put into every version zip
 const CHUNK = 1 << 20; // 1 MB stream buffers for faster transfers
 
 fs.mkdirSync(SHARE_DIR, { recursive: true });
@@ -1485,6 +1486,14 @@ function downloadRelease(req, res, release) {
   const folder = sharedPath(segs);
   if (!folder || !folder.stat.isDirectory()) return sendJson(res, 404, { error: 'Version not found' });
   const entries = zipEntries(folder.full, folder.name);
+  // The zip always carries the installer this app ships (tools/), not the copy that was uploaded with the version:
+  // older copies know nothing about server mode or install reports, and the deploy command needs both.
+  const installerEntry = entries.find((e) => !e.dir && e.zipPath === folder.name + '/Install-MinecraftMods.cmd');
+  if (installerEntry && fs.existsSync(SHIPPED_INSTALLER)) {
+    installerEntry.data = fs.readFileSync(SHIPPED_INSTALLER);
+    installerEntry.size = installerEntry.data.length;
+    installerEntry.mtime = fs.statSync(SHIPPED_INSTALLER).mtimeMs;
+  }
   const packEntry = entries.find((e) => !e.dir && e.zipPath === folder.name + '/pack.json');
   if (packEntry && req.user) {
     const pack = parseJsonSafe(fs.readFileSync(packEntry.full));
