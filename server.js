@@ -1220,7 +1220,10 @@ function nextVersion(version) {
 // After models were marked as uploaded: publish a new installer version based on the current Recent one, so players
 // see "updated" in the banner. Its pack.json gets the bumped version, this site's model feed under modListUrls, and the
 // uploaded model jars bundled as a fallback for when the site is unreachable.
-function autoReleasePack(req, changedModels) {
+// Copies the current (Recent) version into a new folder with the next version number: pack.json gets the bumped
+// version and this site's model feed, and a mods/ folder is there for bundled jars. The caller fills it in and calls
+// finishFork. Returns null when there is no version with a readable pack.json to start from.
+function forkCurrentPack(req) {
   const ready = releases.filter((r) => r.status === 'ready').sort((a, b) => b.added - a.added);
   const base = ready.find((r) => r.tags.includes('Recent')) || ready[0];
   if (!base) return null;
@@ -1240,6 +1243,24 @@ function autoReleasePack(req, changedModels) {
   pack.packVersion = version;
   pack.modListUrls = [...(Array.isArray(pack.modListUrls) ? pack.modListUrls : []).filter((u) => typeof u === 'string' && !/FRIEND-PC|\/api\/models\/pack-entries/.test(u)), feed];
   fs.mkdirSync(path.join(dir, 'mods'), { recursive: true });
+  return { base, pack, version, folder, dir };
+}
+
+// Writes the forked pack.json and registers the folder as the new Recent version.
+function finishFork(req, fork, fields) {
+  fs.writeFileSync(path.join(fork.dir, 'pack.json'), JSON.stringify(fork.pack, null, 2) + '\n');
+  touched(fork.dir, false);
+  const release = { id: nextReleaseId++, version: fork.version, tags: ['Recent'], note: '', by: '', added: Date.now(), folder: fork.folder, status: 'ready', ...fields };
+  releases.push(release);
+  claimRecent(release);
+  saveReleases();
+  return release;
+}
+
+function autoReleasePack(req, changedModels) {
+  const fork = forkCurrentPack(req);
+  if (!fork) return null;
+  const { pack, dir, folder, base } = fork;
   for (const m of models.filter((x) => x.status === 'uploaded')) {
     const match = `${modIdOf(m.namespace)}-*.jar`;
     for (const e of fs.readdirSync(path.join(dir, 'mods'))) {
@@ -1250,18 +1271,155 @@ function autoReleasePack(req, changedModels) {
     const i = pack.mods.findIndex((x) => x && x.match === match);
     if (i >= 0) pack.mods[i] = { ...pack.mods[i], ...entry }; else pack.mods.push(entry);
   }
-  fs.writeFileSync(packFile.replace(baseDir, dir), JSON.stringify(pack, null, 2) + '\n');
-  touched(dir, false);
-
   const names = changedModels.map((m) => m.name).join(', ');
-  const release = {
-    id: nextReleaseId++, version, tags: ['Recent'], note: `Models updated: ${names}`, by: 'models', added: Date.now(), folder, status: 'ready',
-  };
-  releases.push(release);
-  claimRecent(release);
-  saveReleases();
+  const release = finishFork(req, fork, { note: `Models updated: ${names}`, by: 'models' });
   log(req, `pack update      ${folder} from ${base.folder} (${names})`);
   return release;
+}
+
+// ---------- publishing mod suggestions into the server pack ----------
+// The admin picks suggestions on the Mod suggestions tab; the site works out which jar each link means for the pack's
+// Minecraft version and Fabric, downloads it, bundles it into a new installer version, and remembers the file name on
+// the suggestion. When the deploy command reports that file from the Minecraft server, the suggestion counts as installed.
+const MOD_UA = 'lan-file-share/1.0 (+https://github.com/ivaki97-star/lan-file-share)';
+const MAX_MOD_JAR = 256 * 1024 * 1024;
+
+function globToRegex(pattern) {
+  return new RegExp('^' + String(pattern).split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 'i');
+}
+// "fabric-api-0.162.0+26.3.jar" -> "fabric-api-*.jar": everything before the first version number, plus a wildcard.
+function matchPatternFor(file) {
+  const stem = file.replace(/\.jar$/i, '');
+  const m = /^(.+?)([-_+ ])v?\d/.exec(stem);
+  return (m ? m[1] + m[2] : stem) + '*.jar';
+}
+// Same project on the same site: "modrinth.com/mod/fabric-api" whatever the rest of the link says.
+function projectKey(link) {
+  try {
+    const u = new URL(link);
+    const parts = u.pathname.split('/').filter(Boolean);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 'modrinth.com') return parts.length >= 2 ? `modrinth:${parts[1].toLowerCase()}` : '';
+    if (host === 'curseforge.com') return parts.length >= 3 ? `curseforge:${parts[2].toLowerCase()}` : '';
+    return '';
+  } catch { return ''; }
+}
+
+// Which jar a suggestion's link means for this Minecraft version with Fabric: Modrinth and CurseForge are asked through
+// their public APIs, a direct .jar link is taken as is.
+async function resolveModLink(link, mcVersion) {
+  const u = new URL(link);
+  const host = u.hostname.replace(/^www\./, '').toLowerCase();
+  const parts = u.pathname.split('/').filter(Boolean);
+  const opts = { headers: { 'User-Agent': MOD_UA }, signal: AbortSignal.timeout(20000) };
+  if (host === 'modrinth.com' && parts.length >= 2 && ['mod', 'project', 'plugin', 'datapack'].includes(parts[0])) {
+    const slug = parts[1];
+    const q = `game_versions=${encodeURIComponent(JSON.stringify([mcVersion]))}&loaders=${encodeURIComponent(JSON.stringify(['fabric']))}`;
+    const r = await fetch(`https://api.modrinth.com/v2/project/${encodeURIComponent(slug)}/version?${q}`, opts);
+    if (r.status === 404) throw new Error('Modrinth does not know this project');
+    if (!r.ok) throw new Error(`Modrinth answered ${r.status}`);
+    const versions = await r.json();
+    if (!Array.isArray(versions) || !versions.length) throw new Error(`no Fabric build for Minecraft ${mcVersion} on Modrinth`);
+    const v = versions.find((x) => x.version_type === 'release') || versions[0];
+    const f = (v.files || []).find((x) => x.primary) || (v.files || [])[0];
+    if (!f) throw new Error('the Modrinth version has no file');
+    return { file: f.filename, url: f.url, sha512: f.hashes && f.hashes.sha512, page: `https://modrinth.com/mod/${slug}`, version: v.version_number };
+  }
+  if (host === 'curseforge.com' && parts[0] === 'minecraft' && parts[1] === 'mc-mods' && parts[2]) {
+    const slug = parts[2];
+    const wanted = (parts[3] === 'files' || parts[3] === 'download') && /^\d+$/.test(parts[4] || '') ? Number(parts[4]) : 0;
+    const r = await fetch(`https://api.cfwidget.com/minecraft/mc-mods/${encodeURIComponent(slug)}`, opts);
+    if (r.status === 404 || r.status === 202) throw new Error('CurseForge has not been indexed for this project yet; try again in a minute, or link the jar directly');
+    if (!r.ok) throw new Error(`CurseForge lookup answered ${r.status}`);
+    const project = await r.json();
+    const files = Array.isArray(project.files) ? project.files : [];
+    let f = wanted ? files.find((x) => x.id === wanted) : null;
+    if (!f) {
+      const forMc = files.filter((x) => Array.isArray(x.versions) && x.versions.includes(mcVersion));
+      const fabric = forMc.filter((x) => x.versions.some((t) => /^fabric$/i.test(t)));
+      const pool = fabric.length ? fabric : forMc.filter((x) => !x.versions.some((t) => /^(forge|neoforge)$/i.test(t)));
+      f = pool.sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at))[0];
+    }
+    if (!f) throw new Error(`no Fabric build for Minecraft ${mcVersion} on CurseForge`);
+    return { file: f.name, url: `https://www.curseforge.com/api/v1/mods/${project.id}/files/${f.id}/download`, page: `https://www.curseforge.com/minecraft/mc-mods/${slug}/files/${f.id}`, version: f.display };
+  }
+  if (/\.jar$/i.test(u.pathname)) return { file: decodeURIComponent(parts[parts.length - 1]), url: u.href, page: u.href, version: '' };
+  throw new Error('only Modrinth, CurseForge and direct .jar links can be fetched; edit the link');
+}
+
+// Downloads the resolved jar into dir and checks it really is one (and matches the hash Modrinth lists).
+async function fetchModJar(resolved, dir) {
+  const r = await fetch(resolved.url, { headers: { 'User-Agent': MOD_UA }, redirect: 'follow', signal: AbortSignal.timeout(180000) });
+  if (!r.ok) throw new Error(`download answered ${r.status}`);
+  if (Number(r.headers.get('content-length') || 0) > MAX_MOD_JAR) throw new Error('the file is too large');
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length > MAX_MOD_JAR) throw new Error('the file is too large');
+  if (buf.length < 1000 || buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error('the download is not a jar file');
+  if (resolved.sha512 && crypto.createHash('sha512').update(buf).digest('hex') !== resolved.sha512) throw new Error('the download did not match the checksum Modrinth lists');
+  let file = cleanName(resolved.file || '');
+  if (!/\.jar$/i.test(file)) { try { file = cleanName(decodeURIComponent(path.basename(new URL(r.url || resolved.url).pathname))); } catch { /* keep */ } }
+  if (!/\.jar$/i.test(file)) file = (file || 'mod') + '.jar';
+  fs.writeFileSync(path.join(dir, file), buf);
+  return { file, sha256: crypto.createHash('sha256').update(buf).digest('hex'), size: buf.length };
+}
+
+let publishing = false;
+// POST /api/mods/publish { ids: [...], note? }  -> a new installer version with those suggestions' jars bundled.
+function publishSuggestions(req, res) {
+  if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can publish mods to the server pack' });
+  readJson(req, async (body) => {
+    if (!body || !Array.isArray(body.ids)) return sendJson(res, 400, { error: 'Bad request' });
+    const chosen = mods.filter((m) => body.ids.includes(m.id) && m.url);
+    if (!chosen.length) return sendJson(res, 400, { error: 'Pick at least one suggestion that has a link' });
+    if (publishing) return sendJson(res, 409, { error: 'A publish is already running, wait for it to finish' });
+    publishing = true;
+    let fork = null;
+    try {
+      fork = forkCurrentPack(req);
+      if (!fork) return sendJson(res, 400, { error: 'Upload a first installer version with a pack.json before publishing suggestions' });
+      const { pack, dir } = fork;
+      const modsDir = path.join(dir, 'mods');
+      const mcVersion = String(pack.minecraftVersion || '');
+      const added = [], failed = [];
+      for (const m of chosen) {
+        try {
+          const resolved = await resolveModLink(m.url, mcVersion);
+          const got = await fetchModJar(resolved, modsDir);
+          const entry = { name: m.name, match: matchPatternFor(got.file), file: got.file, localFile: `mods/${got.file}`, url: resolved.url, sha256: got.sha256, page: resolved.page };
+          const key = projectKey(resolved.page);
+          const i = pack.mods.findIndex((x) => x && ((key && x.page && projectKey(x.page) === key) || (x.match && globToRegex(x.match).test(got.file))));
+          if (i >= 0) {
+            // Same mod as an entry the pack already has: keep its name and match pattern, swap the file.
+            entry.match = pack.mods[i].match || entry.match;
+            entry.name = pack.mods[i].name || entry.name;
+            if (!key) entry.page = pack.mods[i].page || entry.page;
+            pack.mods[i] = { ...pack.mods[i], ...entry };
+          } else pack.mods.push(entry);
+          delete pack.mods[i >= 0 ? i : pack.mods.length - 1].modrinth; // the bundled file is the one to use
+          for (const e of fs.readdirSync(modsDir)) if (e !== got.file && globToRegex(entry.match).test(e)) fs.rmSync(path.join(modsDir, e), { force: true });
+          m.file = got.file; m.packVersion = fork.version; m.publishedAt = Date.now(); delete m.publishError;
+          added.push({ id: m.id, name: m.name, file: got.file, version: resolved.version || '' });
+        } catch (err) {
+          m.publishError = cleanText(err && err.message, 200);
+          failed.push({ id: m.id, name: m.name, error: m.publishError });
+        }
+      }
+      if (!added.length) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        saveMods();
+        return sendJson(res, 400, { error: 'None of the mods could be fetched: ' + failed.map((f) => `${f.name} (${f.error})`).join('; '), failed });
+      }
+      const note = cleanText(body.note, 500) || `Mods added: ${added.map((a) => a.name).join(', ')}`;
+      const release = finishFork(req, fork, { note, by: req.user ? req.user.name : 'admin' });
+      saveMods();
+      log(req, `pack publish     ${fork.folder}: ${added.map((a) => a.file).join(', ')}${failed.length ? ` (could not fetch: ${failed.map((f) => f.name).join(', ')})` : ''}`);
+      sendJson(res, 201, { release, added, failed });
+    } catch (err) {
+      console.error(err);
+      if (fork) fs.rmSync(fork.dir, { recursive: true, force: true });
+      if (!res.headersSent) sendJson(res, 500, { error: 'Publishing failed: ' + (err && err.message) });
+    } finally { publishing = false; }
+  }, 64 * 1024);
 }
 
 function downloadModels(req, res, url) {
@@ -1463,6 +1621,15 @@ function postInstallReport(req, res) {
       deploys.push(report);
       if (deploys.length > 100) deploys = deploys.slice(-100);
       saveDeploys();
+      // Suggestions published into the pack count as installed once the server reports their jar.
+      const have = new Set(report.mods.map((f) => f.toLowerCase()));
+      let marked = 0;
+      for (const m of mods) {
+        if (!m.file || !have.has(m.file.toLowerCase())) continue;
+        if (m.installed && m.installedVersion === report.packVersion) continue;
+        m.installed = true; m.installedVersion = report.packVersion; m.installedAt = report.time; marked++;
+      }
+      if (marked) saveMods();
       log(req, `server deploy    pack ${report.packVersion} (${report.mods.length} mods, ${report.ok ? 'ok' : 'with problems'})`);
       return sendJson(res, 201, { ok: true });
     }
@@ -1713,6 +1880,7 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && p === '/api/title') return getTitle(req, res, url);
     if (req.method === 'GET' && p === '/api/mods') return sendJson(res, 200, { mods, canDelete: isAdmin(req) });
     if (req.method === 'POST' && p === '/api/mods') return postMod(req, res);
+    if (req.method === 'POST' && p === '/api/mods/publish') return publishSuggestions(req, res);
     if (p.startsWith('/api/mods/')) {
       const mod = mods.find((m) => `/api/mods/${m.id}` === p);
       if (!mod) return sendJson(res, 404, { error: 'Mod not found' });

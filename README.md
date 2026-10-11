@@ -24,6 +24,20 @@ Such a jar goes into the `mods` folder on the Minecraft server and on every play
 - **Players**: the mods installer reads `GET /api/models/pack-entries?status=uploaded` (the address is shown on the Models
   tab) when its `pack.json` lists it under `modListUrls`, so uploaded models install and update without a new pack release.
 
+## Mod suggestions tab: from a link to the Minecraft server
+
+Anyone pastes a mod's page link; the site fills in the name. The admin then ticks suggestions (or "Select all") and
+clicks **Publish selected to the server pack**:
+
+1. For each ticked link the site works out the jar for the pack's Minecraft version with Fabric: Modrinth and
+   CurseForge links through their public APIs (newest release build), a direct `.jar` link as is. Other sites cannot be
+   fetched; edit the link or add the jar to the version folder by hand.
+2. The jars are downloaded, checked (real jar, Modrinth hash) and bundled into a new installer version, a copy of the
+   current one with the next version number and the new entries in its `pack.json`. The banner shows "updated".
+3. Stop the Minecraft server, run `deploy-server.cmd`, start it. The deploy report names the jars it installed, and
+   every suggestion whose jar is on the server moves to **Installed on server** with the version it arrived in.
+4. Players run the installer again and get the same jars from the version zip.
+
 ## Hosting on a real server
 
 Everything is switched by a `.env` file next to `server.js` (see `.env.example`). Without one the site runs as the LAN

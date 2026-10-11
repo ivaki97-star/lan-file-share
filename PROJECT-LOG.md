@@ -52,12 +52,21 @@ What exists, why, and what is next. Newest work at the bottom of each section. D
   (`MC_SERVER`).
 - Friend's data imported and verified on a staging run: 21 chat messages, 9 mods, 6 places, 2 versions, 1 model.
 
+### Oct 11 — suggestions to server pack
+- Mod suggestions tab: admin ticks suggestions (select all), "Publish selected to the server pack". The site resolves
+  Modrinth / CurseForge / direct jar links for the pack's Minecraft version, downloads and checks the jars, bundles them
+  into the next installer version (`POST /api/mods/publish`). The deploy report from the Minecraft server marks the
+  suggestions installed, with the version. Cards show "in vX, waiting for the server deploy" and fetch errors.
+- Version zips always carry `tools/Install-MinecraftMods.cmd` and a model feed pointing at the serving site, so a
+  version uploaded with an old installer or made on the LAN PC still deploys in server mode.
+
 ## Next steps
 
 1. Deploy the site following `DEPLOYMENT.md`; fill `.env`; import the data; register the first (admin) account.
 2. Give the group the invite code. Everyone registers, then downloads the installer again while signed in, so their
    installs get reported.
-3. Put `tools/deploy-server.cmd` in `D:\MinecraftServer`, set `SiteUrl` and `AdminToken`, run it once (server stopped).
+3. Done 2026-10-11: `deploy-server.cmd` is in `D:\MinecraftServer` with `SiteUrl` and `AdminToken` set; the server
+   runs pack 2026-10-12.
 4. Look at the Models tab and the sign-in flow in a browser once; they were tested through the API only. If a cube
    face of the 3D preview looks mirrored, the face mapping in `public/model-viewer.js` is the place.
 5. Dancer NPC: the `dance` clip is not auto-played by Easy Model Entities; trigger it through Easy NPC's model

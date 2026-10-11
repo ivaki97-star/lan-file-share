@@ -153,6 +153,11 @@
   .mod .actions { flex-wrap: wrap; width: 100%; }
   .mod .actions .btn, .mod .actions button { padding: 4px 10px; font-size: 13px; }
   .installed-dot { color: var(--ok); margin-right: 6px; }
+  .mod-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  .mod-tools .mod-status { flex: 1 1 200px; }
+  .mod-pick { width: 16px; height: 16px; margin: 0 8px 0 0; vertical-align: -2px; accent-color: var(--ok); cursor: pointer; }
+  .mod-wait { color: var(--ok); }
+  .mod-fail { color: #e5a84b; }
   @media (max-width: 560px) { .mod-form { grid-template-columns: 1fr; } }
 
   .poi-parsed { font-size: 12px; min-height: 1em; }
@@ -510,6 +515,7 @@
       <h2 id="mod-list-title">Mod suggestions</h2>
       <input type="search" id="mod-search" placeholder="Search mods...">
     </div>
+    <div class="mod-tools" id="mod-tools" hidden></div>
     <div class="files" id="mod-list"></div>
   </section>
 
@@ -824,6 +830,55 @@ async function refreshMods() {
   } catch { lastModsJson = ''; }
 }
 
+// Admin: which suggestions are ticked for the next publish, and what the last publish is doing.
+const pickedMods = new Set();
+let publishStatus = '';
+
+function renderModTools(list, canPublish) {
+  const tools = $('mod-tools');
+  tools.replaceChildren();
+  tools.hidden = !canPublish || !list.length;
+  if (tools.hidden) return;
+  const ids = list.map(m => m.id);
+  const picked = ids.filter(id => pickedMods.has(id));
+  const all = picked.length === ids.length;
+  tools.append(
+    el('button', { className: 'ghost', type: 'button', textContent: all ? 'Select none' : `Select all (${ids.length})`, onclick: () => {
+      for (const id of ids) all ? pickedMods.delete(id) : pickedMods.add(id);
+      renderMods();
+    } }),
+    el('button', { className: 'btn', type: 'button', disabled: !picked.length || !!publishStatus,
+      textContent: picked.length ? `Publish ${picked.length} selected to the server pack` : 'Publish selected to the server pack',
+      title: 'Fetches each mod\'s jar for the pack\'s Minecraft version, publishes a new installer version with them, and marks them installed once the deploy command reports from the Minecraft server',
+      onclick: publishPicked }),
+    el('span', { className: 'mod-status', textContent: publishStatus }));
+}
+
+async function publishPicked() {
+  const ids = [...pickedMods].filter(id => mods.some(m => m.id === id && !m.installed));
+  if (!ids.length) return;
+  const names = mods.filter(m => ids.includes(m.id)).map(m => m.name);
+  if (!confirm(`Publish a new installer version with ${names.length} mod${names.length === 1 ? '' : 's'}?\n\n${names.join('\n')}\n\nThe site fetches each jar for the pack's Minecraft version and Fabric. Afterwards: stop the Minecraft server, run deploy-server.cmd, start it again.`)) return;
+  publishStatus = 'Fetching the mods, this can take a minute...';
+  renderMods();
+  try {
+    const res = await fetch('/api/mods/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Something went wrong');
+    pickedMods.clear();
+    const lines = [`Published ${vLabel(data.release.version)} with: ${data.added.map(a => a.name + (a.version ? ` ${a.version}` : '')).join(', ')}.`];
+    if (data.failed.length) lines.push('Could not fetch: ' + data.failed.map(f => `${f.name} (${f.error})`).join('; ') + '. Fix the link or add the jar by hand to the version folder.');
+    lines.push('Next: stop the Minecraft server, double-click deploy-server.cmd, start the server again. These mods move to "Installed on server" when the deploy reports back.');
+    alert(lines.join('\n\n'));
+    lastReleasesJson = '';
+    refreshReleases();
+  } catch (e) { alert(e.message); }
+  publishStatus = '';
+  lastModsJson = '';
+  await refreshMods();
+  renderMods();
+}
+
 function renderMods() {
   const installedTab = currentTab === 'installed';
   $('links-count').textContent = mods.filter(m => !m.installed).length || '';
@@ -837,6 +892,8 @@ function renderMods() {
     .filter(m => !q || [m.name, m.note, m.url, m.by].some(v => (v || '').toLowerCase().includes(q)))
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
+  const canPublish = canDeleteMods && !installedTab;
+  renderModTools(list, canPublish);
   const box = $('mod-list');
   box.replaceChildren();
   if (!list.length) {
@@ -846,6 +903,8 @@ function renderMods() {
   }
   for (const m of list) {
     const name = el('div', { className: 'file-name mod-name', title: m.name });
+    if (canPublish && m.url) name.append(el('input', { type: 'checkbox', className: 'mod-pick', checked: pickedMods.has(m.id), title: 'Include in the next publish',
+      onchange: (e) => { e.target.checked ? pickedMods.add(m.id) : pickedMods.delete(m.id); renderModTools(list, canPublish); } }));
     if (m.installed) name.append(el('span', { className: 'installed-dot', textContent: '✔' }));
     name.append(m.url ? el('a', { href: m.url, target: '_blank', rel: 'noopener noreferrer', textContent: m.name }) : m.name);
 
@@ -853,6 +912,10 @@ function renderMods() {
     if (m.url) meta.push(new URL(m.url).hostname.replace(/^www\./, ''));
     if (m.note) meta.push(m.note);
     meta.push('added ' + (m.by ? `by ${m.by} ` : '') + fmtDate(m.added));
+    const metaEl = el('div', { className: 'file-meta', textContent: meta.join(' · ') });
+    if (m.publishError && !m.installed) metaEl.append(' · ', el('span', { className: 'mod-fail', textContent: `could not fetch: ${m.publishError}` }));
+    else if (m.packVersion && !m.installed) metaEl.append(' · ', el('span', { className: 'mod-wait', textContent: `in ${vLabel(m.packVersion)} as ${m.file}, waiting for the server deploy` }));
+    else if (m.installed && m.installedVersion) metaEl.append(' · ', el('span', { className: 'mod-wait', textContent: `on the server since ${vLabel(m.installedVersion)}` }));
 
     const actions = el('div', { className: 'actions' });
     if (m.url) actions.append(el('a', { className: 'btn', href: m.url, target: '_blank', rel: 'noopener noreferrer', textContent: 'Open' }));
@@ -861,7 +924,7 @@ function renderMods() {
       el('button', { className: 'ghost', textContent: 'Edit', onclick: () => editMod(m) }));
     if (canDeleteMods) actions.append(el('button', { className: 'ghost danger', textContent: 'Remove', onclick: () => removeMod(m) }));
     box.append(el('div', { className: 'file mod' + (m.added > seenAt ? ' new' : '') },
-      el('div', { className: 'file-main' }, name, el('div', { className: 'file-meta', textContent: meta.join(' · ') })),
+      el('div', { className: 'file-main' }, name, metaEl),
       actions));
   }
 }
