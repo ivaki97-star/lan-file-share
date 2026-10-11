@@ -1495,10 +1495,22 @@ function downloadRelease(req, res, release) {
     installerEntry.mtime = fs.statSync(SHIPPED_INSTALLER).mtimeMs;
   }
   const packEntry = entries.find((e) => !e.dir && e.zipPath === folder.name + '/pack.json');
-  if (packEntry && req.user) {
-    const pack = parseJsonSafe(fs.readFileSync(packEntry.full));
-    if (pack && typeof pack === 'object') {
+  const pack = packEntry ? parseJsonSafe(fs.readFileSync(packEntry.full)) : null;
+  if (pack && typeof pack === 'object') {
+    let changed = false;
+    // The model feed in pack.json is this site's own address; a version made on another host (the LAN PC before the
+    // move) still names that host, so the feed is pointed at the site the zip is downloaded from.
+    const feed = `${siteBase(req)}/api/models/pack-entries?status=uploaded`;
+    const urls = Array.isArray(pack.modListUrls) ? pack.modListUrls : [];
+    if (urls.some((u) => typeof u === 'string' && /FRIEND-PC|\/api\/models\/pack-entries/.test(u) && u !== feed)) {
+      pack.modListUrls = [...urls.filter((u) => typeof u === 'string' && !/FRIEND-PC|\/api\/models\/pack-entries/.test(u)), feed];
+      changed = true;
+    }
+    if (req.user) {
       pack.report = { url: `${siteBase(req)}/api/installs`, token: req.user.token, user: req.user.name };
+      changed = true;
+    }
+    if (changed) {
       packEntry.data = Buffer.from(JSON.stringify(pack, null, 2) + '\n');
       packEntry.size = packEntry.data.length;
     }
