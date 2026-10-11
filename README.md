@@ -59,7 +59,8 @@ address, it is written into the installer. Open only ports 80 and 443; `BIND=127
 
 ### Moving the data from the LAN PC
 
-On the PC that hosted the LAN share: `node server.js --export backup.zip` (or the admin's "Export data" link).
+On the PC that hosted the LAN share: `node server.js --export backup.zip` (or the admin's "Export data" link), or simply
+zip the whole app folder; the import finds the data inside it and skips the program files.
 On the server, with the service stopped: `sudo -u lanshare DATA_DIR=/var/lib/lan-file-share node server.js --import backup.zip`.
 That restores the shared files, chat, mod lists, places, installer versions, models and accounts.
 

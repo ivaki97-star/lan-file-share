@@ -1839,6 +1839,26 @@ async function runCli() {
     }
     const cd = Buffer.alloc(cdSize);
     fs.readSync(fd, cd, 0, cdSize, cdOffset);
+    // The zip may be an export (shared/ and the json files at the top) or a zip of the whole app folder, possibly
+    // nested ("LAN Party/file-share/shared/..."). Find the folder that holds the data and import only the data.
+    const allNames = [];
+    for (let q = 0, i = 0; i < count; i++) {
+      const nameLen = cd.readUInt16LE(q + 28);
+      allNames.push(cd.toString('utf8', q + 46, q + 46 + nameLen).replace(/\\/g, '/'));
+      q += 46 + nameLen + cd.readUInt16LE(q + 30) + cd.readUInt16LE(q + 32);
+    }
+    let prefix = '';
+    for (const name of allNames) {
+      const m = /^(.*?)(shared\/|chat\.jsonl$|releases\.json$|mods\.json$|models\.json$|pois\.json$)/.exec(name);
+      if (m && (!prefix || m[1].length < prefix.length)) prefix = m[1];
+    }
+    console.log(prefix ? `Data found under "${prefix}" in the zip` : 'Data found at the top of the zip');
+    const wanted = (name) => {
+      if (!name.startsWith(prefix)) return null;
+      const rel = name.slice(prefix.length);
+      if (rel.startsWith('shared/') || DATA_FILES.includes(rel) || rel === 'secret.key') return rel;
+      return null; // server.js, public/, start.bat, incoming/, .git etc. are not data
+    };
     let p = 0;
     let n = 0;
     for (let i = 0; i < count; i++) {
@@ -1861,8 +1881,8 @@ async function runCli() {
       }
       p += 46 + nameLen + extraLen + commentLen;
       if (name.includes('..') || name.startsWith('/')) continue;
-      // Exported zips have "shared/..." and the json files at the top; a zip of the whole data folder works too.
-      name = name.replace(/^(data|lan-file-share-data)\//, '');
+      name = wanted(name);
+      if (!name) continue;
       const target = path.join(DATA_DIR, name);
       if (name.endsWith('/')) { fs.mkdirSync(target, { recursive: true }); continue; }
       const head = Buffer.alloc(30);
