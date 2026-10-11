@@ -346,7 +346,12 @@ function patchMod(req, res, mod) {
     if ('url' in body) {
       const url = cleanUrl(body.url);
       if (url === null) return sendJson(res, 400, { error: 'That link doesn\'t look valid' });
-      mod.url = url;
+      if (url !== mod.url) {
+        // A new link means a new file: what was published or installed before no longer describes it.
+        mod.url = url;
+        delete mod.file; delete mod.packVersion; delete mod.publishedAt; delete mod.publishError; delete mod.installedVersion;
+        mod.updatedAt = Date.now();
+      }
     }
     if ('installed' in body) mod.installed = !!body.installed;
     saveMods();

@@ -916,6 +916,7 @@ function renderMods() {
     if (m.note) meta.push(m.note);
     meta.push('added ' + (m.by ? `by ${m.by} ` : '') + fmtDate(m.added));
     const metaEl = el('div', { className: 'file-meta', textContent: meta.join(' · ') });
+    if (m.updatedAt && !m.packVersion && !m.installed) metaEl.append(' · ', el('span', { className: 'mod-wait', textContent: `new file uploaded ${fmtDate(m.updatedAt)}, not published yet` }));
     if (m.publishError && !m.installed) metaEl.append(' · ', el('span', { className: 'mod-fail', textContent: `could not fetch: ${m.publishError}` }));
     else if (m.packVersion && !m.installed) metaEl.append(' · ', el('span', { className: 'mod-wait', textContent: `in ${vLabel(m.packVersion)} as ${m.file}, waiting for the server deploy` }));
     else if (m.installed && m.installedVersion) metaEl.append(' · ', el('span', { className: 'mod-wait', textContent: `on the server since ${vLabel(m.installedVersion)}` }));
@@ -924,7 +925,8 @@ function renderMods() {
     if (m.url) actions.append(el('a', { className: 'btn', href: m.url, target: '_blank', rel: 'noopener noreferrer', textContent: 'Open' }));
     actions.append(
       el('button', { className: 'ghost', textContent: m.installed ? 'Move to suggestions' : 'Mark installed', onclick: () => updateMod(m, { installed: !m.installed }) }),
-      el('button', { className: 'ghost', textContent: 'Edit', onclick: () => editMod(m) }));
+      el('button', { className: 'ghost', textContent: 'Edit', onclick: () => editMod(m) }),
+      el('button', { className: 'ghost', textContent: 'New version...', title: 'Upload a newer jar of this mod: it goes to Files / Mods, this card points at it and moves back to the suggestions for the admin to publish', onclick: () => newVersion(m) }));
     if (canDeleteMods) actions.append(el('button', { className: 'ghost danger', textContent: 'Remove', onclick: () => removeMod(m) }));
     box.append(el('div', { className: 'file mod' + (m.added > seenAt ? ' new' : '') },
       el('div', { className: 'file-main' }, name, metaEl),
@@ -1018,6 +1020,30 @@ $('mod-file').addEventListener('change', async () => {
   }
   $('mod-file').value = '';
 });
+
+// A newer build of an existing mod: upload it, point the card at it and send it back to the suggestions tab.
+function newVersion(m) {
+  const input = el('input', { type: 'file', accept: '.jar,.zip,application/java-archive,application/zip' });
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    if (!/\.(jar|zip)$/i.test(file.name)) { alert('Mods are .jar files (or a .zip).'); return; }
+    const status = $('mod-status');
+    status.className = 'mod-status';
+    status.textContent = `Uploading ${file.name} for ${m.name}...`;
+    try {
+      const { promise } = putFile(file, 'Mods', (loaded) => { status.textContent = `Uploading ${file.name}... ${Math.round(loaded / file.size * 100)}%`; });
+      const data = await promise;
+      await modRequest('/api/mods/' + m.id, 'PATCH', { url: `${location.origin}/files/Mods/${encodeURIComponent(data.name)}`, installed: false });
+      status.textContent = `${m.name} now points at ${data.name}. It is back under Mod suggestions: tick it and publish to ship it.`;
+      lastJson = '';
+    } catch (err) {
+      status.className = 'mod-status warn';
+      status.textContent = err.message;
+    }
+  };
+  input.click();
+}
 
 // "cool-textures-1.2.0+mc26.3.jar" -> "Cool Textures"
 function nameFromFile(fileName) {
