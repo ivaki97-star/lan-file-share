@@ -4,6 +4,7 @@ import lan.quick.Animals;
 import lan.quick.Place;
 import lan.quick.client.mixin.ContainerScreenAccessor;
 import lan.quick.net.QuickSyncPayload;
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
@@ -49,6 +50,9 @@ public class QuickMenu {
 	private static String category = "";
 	private static int page = 0;
 	private static int bringCount = 1; // 1, 5 or 0 = all nearby
+	private static String bringTo = "me"; // "me", "place" or "coords"
+	private static String bringPlace = ""; // the chosen place's title when bringTo is "place"
+	private static boolean pickingPlace = false; // the Animals tab is showing the place list
 
 	static void update(QuickSyncPayload p) {
 		places = p.places();
@@ -168,7 +172,7 @@ public class QuickMenu {
 		// Esc (closes the modal) and the inventory key (closes the whole screen, as it always does).
 		ScreenMouseEvents.allowMouseClick(screen).register((scr, ev) -> {
 			if (!modalOpen) return true;
-			if (ev.button() == 0) clickModal(ev.x(), ev.y());
+			if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT) clickModal(ev.x(), ev.y());
 			return false;
 		});
 		ScreenMouseEvents.allowMouseRelease(screen).register((scr, ev) -> !modalOpen);
@@ -191,7 +195,8 @@ public class QuickMenu {
 		return switch (tab) {
 			case 0 -> places.isEmpty() ? "/quick mark <name> adds one" : filtered().size() + " of " + places.size() + " places";
 			case 2 -> "Needs the Boat Fly mod";
-			case 3 -> bringCount == 0 ? "every one within " + Animals.ALL_RADIUS + " blocks" : "the nearest " + (bringCount == 1 ? "one" : bringCount) + " comes to you";
+			case 3 -> (bringCount == 0 ? "all within " + Animals.ALL_RADIUS + " blocks" : "nearest " + bringCount)
+				+ (bringTo.equals("place") ? " -> " + (bringPlace.isEmpty() ? "pick a place" : bringPlace) : bringTo.equals("coords") ? " -> you type x y z" : " -> to you");
 			default -> "";
 		};
 	}
@@ -343,6 +348,19 @@ public class QuickMenu {
 	private void animalPicker(List<Box> out, int w, int h) {
 		int y = chips(out, w, 0, List.of("Nearest 1", "Nearest 5", "All nearby"), List.of("1", "5", "0"), Integer.toString(bringCount),
 			k -> { bringCount = Integer.parseInt(k); rebuild(); });
+		String placeLabel = bringTo.equals("place") && !bringPlace.isEmpty() ? "To " + bringPlace : "To a place";
+		y = chips(out, w, y, List.of("To me", placeLabel, "To x y z"), List.of("me", "place", "coords"), pickingPlace ? "" : bringTo, k -> {
+			if (k.equals("place")) { pickingPlace = true; page = 0; }
+			else { bringTo = k; pickingPlace = false; }
+			rebuild();
+		});
+		if (pickingPlace) {
+			// choose the destination from the places list, then back to the creatures
+			List<Box> sub = new ArrayList<>();
+			placePicker(sub, w, h - y, p -> { bringTo = "place"; bringPlace = p.title(); pickingPlace = false; page = 0; rebuild(); });
+			for (Box b : sub) out.add(new Box(b.x(), b.y() + y, b.w(), b.h(), b.label(), b.icon(), b.tooltip(), b.action(), b.enabled(), b.selected(), b.kind()));
+			return;
+		}
 		int perRow = Math.max(1, (w + GAP) / (CELL + GAP));
 		int rows = Math.max(1, (h - y) / (CELL + GAP));
 		int perPage = perRow * rows;
@@ -355,8 +373,14 @@ public class QuickMenu {
 			Animals.Kind kind = kinds.get(i);
 			int k = i - start;
 			ItemStack egg = new ItemStack(BuiltInRegistries.ITEM.getOptional(Identifier.withDefaultNamespace(kind.id() + "_spawn_egg")).orElse(Items.EGG));
-			out.add(new Box((k % perRow) * (CELL + GAP), y + (k / perRow) * (CELL + GAP), CELL, CELL, kind.label(), egg,
-				"Bring " + kind.label().toLowerCase(), () -> run("quick bring " + kind.id() + " " + bringCount, true), true, false, Kind.ICON));
+			String base = "quick bring " + kind.id() + " " + bringCount;
+			Runnable action = switch (bringTo) {
+				case "place" -> bringPlace.isEmpty() ? () -> { pickingPlace = true; rebuild(); } : () -> run(base + " place " + bringPlace, true);
+				case "coords" -> () -> client.setScreenAndShow(new ChatScreen("/" + base + " to ", false));
+				default -> () -> run(base, true);
+			};
+			String tip = "Bring " + kind.label().toLowerCase() + (bringTo.equals("place") ? " to " + (bringPlace.isEmpty() ? "a place" : bringPlace) : bringTo.equals("coords") ? " to x y z (you type them)" : " to you");
+			out.add(new Box((k % perRow) * (CELL + GAP), y + (k / perRow) * (CELL + GAP), CELL, CELL, kind.label(), egg, tip, action, true, false, Kind.ICON));
 		}
 		int used = (int) Math.ceil(Math.min(kinds.size() - start, perPage) / (double) perRow);
 		pager(out, w, y + Math.max(used, 0) * (CELL + GAP), pages);
@@ -477,6 +501,27 @@ public class QuickMenu {
 		for (Box b : modalBoxes) {
 			if (b.enabled() && !b.selected() && b.hit(x, y, cx, cy)) { b.action().run(); return; }
 		}
+	}
+
+	/** Used by the game test: the centre of a modal box or tab with this label, in screen coordinates, or null. */
+	public int[] center(String label) {
+		for (int i = 0; i < TABS.length; i++) if (TABS[i].name().equals(label) && modalOpen) {
+			int tabW = 28, tabH = 24, tx = mx + 6 + i * (tabW + 2), ty = i == tab ? my - tabH + 2 : my - tabH + 6;
+			return new int[]{tx + tabW / 2, ty + tabH / 2};
+		}
+		for (Box b : modalBoxes) if (b.label().equals(label)) return new int[]{cx + b.x() + b.w() / 2, cy + b.y() + b.h() / 2};
+		for (AbstractWidget w : mine) if (w.getMessage().getString().equals(label)) return new int[]{w.getX() + w.getWidth() / 2, w.getY() + w.getHeight() / 2};
+		return null;
+	}
+
+	/** Debug: which screen children claim the mouse at x,y, and the state of our widgets. */
+	public String debug(double x, double y) {
+		StringBuilder sb = new StringBuilder("children=");
+		for (var c : screen.children()) sb.append(c.getClass().getSimpleName()).append(c.isMouseOver(x, y) ? "[HIT]" : "").append(',');
+		sb.append(" mine=");
+		for (AbstractWidget w : mine) sb.append(w.getMessage().getString()).append('@').append(w.getX()).append(',').append(w.getY()).append(w.isMouseOver(x, y) ? "[HIT]" : "").append(w.active ? "" : "[inactive]").append(w.visible ? "" : "[hidden]").append(' ');
+		sb.append(" inChildren=").append(screen.children().containsAll(mine));
+		return sb.toString();
 	}
 
 	/** Used by the game test: presses the box with this label in the open modal. */

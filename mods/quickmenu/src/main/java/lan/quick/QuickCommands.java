@@ -46,10 +46,16 @@ public class QuickCommands {
 		quick.then(Commands.literal("night").executes(c -> vanilla(c, "time set night", "It is night.")));
 		quick.then(Commands.literal("clear").executes(c -> vanilla(c, "weather clear", "The sky is clear.")));
 		quick.then(Commands.literal("rain").executes(c -> vanilla(c, "weather rain", "Rain.")));
+		// /quick bring <animal> [count] [to <x> <y> <z> | place <name>]   count 0 = all nearby, default 1, default target = you
 		quick.then(Commands.literal("bring")
 			.then(Commands.argument("animal", StringArgumentType.word()).suggests(QuickCommands::suggestAnimals)
-				.executes(c -> bring(c, StringArgumentType.getString(c, "animal"), 1))
-				.then(Commands.argument("count", IntegerArgumentType.integer(0, 64)).executes(c -> bring(c, StringArgumentType.getString(c, "animal"), IntegerArgumentType.getInteger(c, "count"))))));
+				.executes(c -> bring(c, StringArgumentType.getString(c, "animal"), 1, null, null))
+				.then(Commands.literal("to").then(Commands.argument("position", Vec3Argument.vec3()).executes(c -> bring(c, StringArgumentType.getString(c, "animal"), 1, Vec3Argument.getVec3(c, "position"), null))))
+				.then(Commands.literal("place").then(Commands.argument("place", StringArgumentType.greedyString()).suggests(QuickCommands::suggestPlaces).executes(c -> bring(c, StringArgumentType.getString(c, "animal"), 1, null, StringArgumentType.getString(c, "place")))))
+				.then(Commands.argument("count", IntegerArgumentType.integer(0, 64))
+					.executes(c -> bring(c, StringArgumentType.getString(c, "animal"), IntegerArgumentType.getInteger(c, "count"), null, null))
+					.then(Commands.literal("to").then(Commands.argument("position", Vec3Argument.vec3()).executes(c -> bring(c, StringArgumentType.getString(c, "animal"), IntegerArgumentType.getInteger(c, "count"), Vec3Argument.getVec3(c, "position"), null))))
+					.then(Commands.literal("place").then(Commands.argument("place", StringArgumentType.greedyString()).suggests(QuickCommands::suggestPlaces).executes(c -> bring(c, StringArgumentType.getString(c, "animal"), IntegerArgumentType.getInteger(c, "count"), null, StringArgumentType.getString(c, "place"))))))));
 		quick.then(Commands.literal("back").executes(QuickCommands::back));
 		quick.then(Commands.literal("spawn").executes(QuickCommands::spawn));
 		quick.then(Commands.literal("home").executes(QuickCommands::home));
@@ -157,8 +163,22 @@ public class QuickCommands {
 	 * /quick bring cow 5      -> the five nearest cows
 	 * /quick bring wolf 0     -> every wolf within Animals.ALL_RADIUS blocks
 	 */
-	private static int bring(CommandContext<CommandSourceStack> c, String id, int count) throws CommandSyntaxException {
+	private static int bring(CommandContext<CommandSourceStack> c, String id, int count, Vec3 to, String placeName) throws CommandSyntaxException {
 		ServerPlayer player = c.getSource().getPlayerOrException();
+		String where = "here";
+		Vec3 target = player.position();
+		if (placeName != null) {
+			Place p = LanQuick.places.find(placeName);
+			if (p == null) {
+				c.getSource().sendFailure(Component.literal("No place called \"" + placeName + "\"."));
+				return 0;
+			}
+			target = new Vec3(p.x() + 0.5, p.y(), p.z() + 0.5);
+			where = "at " + p.title();
+		} else if (to != null) {
+			target = to;
+			where = String.format("at %d %d %d", (int) Math.floor(to.x), (int) Math.floor(to.y), (int) Math.floor(to.z));
+		}
 		Animals.Kind kind = Animals.find(id);
 		Identifier typeId = Identifier.withDefaultNamespace(kind != null ? kind.id() : id.toLowerCase());
 		var type = BuiltInRegistries.ENTITY_TYPE.getOptional(typeId);
@@ -173,7 +193,7 @@ public class QuickCommands {
 		List<Mob> sorted = new ArrayList<>(found);
 		sorted.sort(Comparator.comparingDouble(m -> m.distanceToSqr(player)));
 		int wanted = count == 0 ? sorted.size() : Math.min(count, sorted.size());
-		Vec3 at = player.position();
+		Vec3 at = target;
 		int n = 0;
 		for (Mob m : sorted.subList(0, wanted)) {
 			double a = n * 2.39996; // golden angle: spread them in a loose spiral around the player
@@ -187,7 +207,8 @@ public class QuickCommands {
 			return 0;
 		}
 		int moved = n;
-		c.getSource().sendSuccess(() -> Component.literal(moved == 1 ? name + " is here." : moved + " x " + name.toLowerCase() + " are here."), false);
+		String w = where;
+		c.getSource().sendSuccess(() -> Component.literal(moved == 1 ? name + " is " + w + "." : moved + " x " + name.toLowerCase() + " are " + w + "."), false);
 		return moved;
 	}
 

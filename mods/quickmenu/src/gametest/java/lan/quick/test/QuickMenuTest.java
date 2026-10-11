@@ -74,7 +74,37 @@ public class QuickMenuTest implements FabricClientGameTest {
 			boolean stillInventory = context.computeOnClient(client -> client.gui.screen() instanceof InventoryScreen);
 			if (!stillInventory) throw new AssertionError("Esc closed the whole inventory");
 
+			// Real mouse clicks: the Weather icon in the column opens the modal, the Weather tab, then the Night button
+			double scale = context.computeOnClient(client -> (double) client.getWindow().getScreenWidth() / client.getWindow().getGuiScaledWidth());
+			int[] icon = QuickMenu.current().center("Weather");
+			if (icon == null) throw new AssertionError("no Weather icon");
+			context.getInput().setCursorPos(icon[0] * scale, icon[1] * scale);
+			context.getInput().pressMouse(com.mojang.blaze3d.platform.InputConstants.MOUSE_BUTTON_LEFT);
+			context.waitTicks(3);
+			if (!QuickMenu.current().isModalOpen()) {
+				String dbg = context.computeOnClient(client -> QuickMenu.current().debug(icon[0], icon[1]));
+				throw new AssertionError("clicking the Weather icon did not open the modal; cursor " + icon[0] + "," + icon[1] + " scale " + scale + " " + dbg);
+			}
+			int[] placesTab = QuickMenu.current().center("Places");
+			context.getInput().setCursorPos(placesTab[0] * scale, placesTab[1] * scale);
+			context.getInput().pressMouse(com.mojang.blaze3d.platform.InputConstants.MOUSE_BUTTON_LEFT);
+			context.waitTicks(3);
+			if (QuickMenu.current().center("All") == null) throw new AssertionError("clicking the Places tab in the modal did not switch tabs");
+			int[] weatherTab = QuickMenu.current().center("Weather");
+			context.getInput().setCursorPos(weatherTab[0] * scale, weatherTab[1] * scale);
+			context.getInput().pressMouse(com.mojang.blaze3d.platform.InputConstants.MOUSE_BUTTON_LEFT);
+			context.waitTicks(3);
+			int[] night = QuickMenu.current().center("Night");
+			if (night == null) throw new AssertionError("no Night button after clicking the Weather tab");
+			context.getInput().setCursorPos(night[0] * scale, night[1] * scale);
+			context.getInput().pressMouse(com.mojang.blaze3d.platform.InputConstants.MOUSE_BUTTON_LEFT);
+			world.getConnection().waitForServerboundPackets();
+			context.waitTicks(10);
+			long nightTime = world.getServer().computeOnServer(s -> s.overworld().getOverworldClockTime() % 24000L);
+			if (nightTime < 12500 || nightTime > 13500) throw new AssertionError("clicking Night did not set the time, got " + nightTime);
+
 			// Day from the modal
+			openInventory(context);
 			context.runOnClient(client -> QuickMenu.openModal(1));
 			context.waitTicks(2);
 			context.runOnClient(client -> { if (!QuickMenu.current().press("Day")) throw new AssertionError("no Day button"); });
@@ -100,6 +130,32 @@ public class QuickMenuTest implements FabricClientGameTest {
 				return Math.sqrt(cows.get(0).distanceToSqr(player));
 			});
 			if (dist > 6) throw new AssertionError("cow is still " + dist + " blocks away");
+
+			// ...and to a place: choose "To a place", pick Cow farm (marked where we stand), summon another cow far away, bring it
+			world.getServer().runCommand("summon minecraft:cow -30 -60 -30 {NoAI:1b}");
+			context.waitTicks(10);
+			openInventory(context);
+			context.runOnClient(client -> QuickMenu.openModal(3));
+			context.waitTicks(2);
+			context.runOnClient(client -> { if (!QuickMenu.current().press("To a place")) throw new AssertionError("no To a place chip"); });
+			context.waitTicks(2);
+			context.takeScreenshot(TestScreenshotOptions.of("21-modal-animals-pick-place"));
+			context.runOnClient(client -> { if (!QuickMenu.current().press("Cow farm")) throw new AssertionError("no Cow farm in the place list"); });
+			context.waitTicks(2);
+			context.takeScreenshot(TestScreenshotOptions.of("22-modal-animals-to-place"));
+			context.runOnClient(client -> { if (!QuickMenu.current().press("Nearest 5")) throw new AssertionError("no Nearest 5 chip"); });
+			context.waitTicks(2);
+			context.runOnClient(client -> { if (!QuickMenu.current().press("Cow")) throw new AssertionError("no Cow icon"); });
+			world.getConnection().waitForServerboundPackets();
+			context.waitTicks(10);
+			double dist2 = world.getServer().computeOnServer(s -> {
+				var player = s.getPlayerList().getPlayers().get(0);
+				var cows = s.overworld().getEntities(EntityTypeTest.forClass(Mob.class), m -> m.getType() == EntityTypes.COW);
+				double worst = 0;
+				for (var cow : cows) worst = Math.max(worst, Math.sqrt(cow.distanceToSqr(player)));
+				return worst;
+			});
+			if (dist2 > 8) throw new AssertionError("a cow is still " + dist2 + " blocks from the place");
 
 			// Places from the modal: teleport to the marked spot
 			openInventory(context);
