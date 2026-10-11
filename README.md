@@ -37,6 +37,12 @@ party share it always was. With `MODE=hosted`:
 - **Server deploys.** `tools/deploy-server.cmd` in the Minecraft server folder pulls the current pack with
   `ADMIN_TOKEN`, installs mods and uploaded models into the server, and reports it. The banner shows what the server runs.
 - **Model feed and downloads** need a token; the installer sends the player's one, the deploy command the admin one.
+- **Changelog** (link in the banner): every installer version with the mods added, removed or changed since the
+  version before, computed from each version's pack.json. Players who installed by hand can mark a version as
+  installed from the banner.
+- **Who is online**: with `MC_SERVER=host:port` in `.env` (works in LAN mode too) the site pings the Minecraft server
+  every 30 seconds and shows the player names under the title. Names are hidden if the server sets
+  `hide-online-players=true`, and the ping shows at most 12 names.
 
 ### Setup (Linux, Node 20.12 or newer)
 

@@ -6,6 +6,7 @@ const os = require('os');
 const { pipeline } = require('stream');
 const zlib = require('zlib');
 const crypto = require('crypto');
+const net = require('net');
 const { crc32 } = zlib;
 
 // ---------- configuration ----------
@@ -20,6 +21,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''; // lets the deploy command on
 const INVITE_CODE = process.env.INVITE_CODE || ''; // needed to register when set
 const TRUST_PROXY = (process.env.TRUST_PROXY || (MODE === 'hosted' ? 'on' : 'off')).toLowerCase() === 'on'; // behind Caddy/nginx
 const BIND = process.env.BIND || '0.0.0.0';
+const MC_SERVER = process.env.MC_SERVER || ''; // host:port of the Minecraft server, shows who is online
 
 const PORT = Number(process.env.PORT) || 8080;
 const SHARE_DIR = path.join(DATA_DIR, 'shared');
@@ -1507,6 +1509,109 @@ function exportEntries() {
   return entries;
 }
 
+
+// ---------- Minecraft server status (the same ping the multiplayer screen does) ----------
+let mcStatus = { enabled: !!MC_SERVER, online: false, checked: 0 };
+
+function varint(n) {
+  const out = [];
+  do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; out.push(b); } while (n);
+  return Buffer.from(out);
+}
+function readVarint(buf, pos) {
+  let n = 0, shift = 0, i = pos;
+  for (;;) {
+    if (i >= buf.length) return null;
+    const b = buf[i++];
+    n |= (b & 0x7f) << shift;
+    if (!(b & 0x80)) return { value: n, next: i };
+    shift += 7;
+    if (shift > 35) return null;
+  }
+}
+function packet(id, payload) {
+  const body = Buffer.concat([varint(id), payload]);
+  return Buffer.concat([varint(body.length), body]);
+}
+function motdText(d) {
+  if (!d) return '';
+  if (typeof d === 'string') return d;
+  return (d.text || '') + (Array.isArray(d.extra) ? d.extra.map(motdText).join('') : '');
+}
+
+function pingMinecraft(address) {
+  return new Promise((resolve) => {
+    const [host, portStr] = address.split(':');
+    const port = Number(portStr) || 25565;
+    const sock = net.createConnection({ host, port });
+    const chunks = [];
+    let done = false;
+    const finish = (result) => { if (!done) { done = true; sock.destroy(); resolve(result); } };
+    const timer = setTimeout(() => finish({ online: false, error: 'timeout' }), 5000);
+    const started = Date.now();
+    sock.on('connect', () => {
+      const hostBuf = Buffer.from(host, 'utf8');
+      const handshake = Buffer.concat([varint(-1 >>> 0), varint(hostBuf.length), hostBuf, Buffer.from([port >> 8, port & 0xff]), varint(1)]);
+      sock.write(Buffer.concat([packet(0, handshake), packet(0, Buffer.alloc(0))]));
+    });
+    sock.on('data', (c) => {
+      chunks.push(c);
+      const buf = Buffer.concat(chunks);
+      const len = readVarint(buf, 0);
+      if (!len || buf.length < len.next + len.value) return;
+      const id = readVarint(buf, len.next);
+      const strLen = id && readVarint(buf, id.next);
+      if (!strLen) return finish({ online: false, error: 'bad response' });
+      clearTimeout(timer);
+      try {
+        const j = JSON.parse(buf.toString('utf8', strLen.next, strLen.next + strLen.value));
+        finish({
+          online: true, latency: Date.now() - started,
+          players: (j.players && j.players.online) || 0, max: (j.players && j.players.max) || 0,
+          names: ((j.players && j.players.sample) || []).map((p) => p.name).filter(Boolean).sort(),
+          version: (j.version && j.version.name) || '', motd: motdText(j.description).slice(0, 120),
+        });
+      } catch { finish({ online: false, error: 'bad json' }); }
+    });
+    sock.on('error', (e) => { clearTimeout(timer); finish({ online: false, error: e.code || e.message }); });
+    sock.on('close', () => { clearTimeout(timer); finish({ online: false, error: 'closed' }); });
+  });
+}
+
+async function refreshMcStatus() {
+  if (!MC_SERVER) return;
+  const r = await pingMinecraft(MC_SERVER);
+  mcStatus = { enabled: true, address: MC_SERVER, checked: Date.now(), ...r };
+}
+
+// ---------- changelog: what changed between installer versions, from each version's pack.json ----------
+function modKey(m) { return String((m && (m.match || m.name)) || '').toLowerCase(); }
+function modSig(m) { return String((m && (m.localFile || m.file || m.url || m.modrinth)) || ''); }
+
+function changelog() {
+  const ready = releases.filter((r) => r.status === 'ready').sort((a, b) => a.added - b.added);
+  const out = [];
+  let prev = null;
+  for (const r of ready) {
+    const packFile = path.join(SHARE_DIR, INSTALLER_DIR, r.folder, 'pack.json');
+    const pack = fs.existsSync(packFile) ? parseJsonSafe(fs.readFileSync(packFile)) : null;
+    const mods = pack && Array.isArray(pack.mods) ? pack.mods.filter((m) => m && m.name) : null;
+    const entry = { id: r.id, version: r.version, tags: r.tags, note: r.note, by: r.by, added: r.added, minecraft: pack && pack.minecraftVersion || '', mods: mods ? mods.map((m) => m.name) : null, diff: null };
+    if (mods && prev) {
+      const before = new Map(prev.map((m) => [modKey(m), m]));
+      const after = new Map(mods.map((m) => [modKey(m), m]));
+      entry.diff = {
+        added: mods.filter((m) => !before.has(modKey(m))).map((m) => m.name),
+        removed: prev.filter((m) => !after.has(modKey(m))).map((m) => m.name),
+        changed: mods.filter((m) => before.has(modKey(m)) && modSig(before.get(modKey(m))) !== modSig(m)).map((m) => `${m.name}: ${path.basename(modSig(before.get(modKey(m)))) || '?'} -> ${path.basename(modSig(m)) || '?'}`),
+      };
+    }
+    if (mods) prev = mods;
+    out.push(entry);
+  }
+  return out.reverse();
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -1527,6 +1632,20 @@ const server = http.createServer((req, res) => {
     }
 
     if (p === '/api/installs' && req.method === 'POST') return postInstallReport(req, res);
+    if (p === '/api/installs/manual' && req.method === 'POST') {
+      // "I installed vX" without running the installer (e.g. installed by hand).
+      if (!req.user) return sendJson(res, 401, { error: 'Sign in first' });
+      return readJson(req, (body) => {
+        const version = cleanText(body && body.packVersion, 40);
+        if (!version) return sendJson(res, 400, { error: 'Which version?' });
+        req.user.install = { packVersion: version, ok: true, time: Date.now(), manual: true, minecraft: '', problems: [], mods: [], machine: '' };
+        saveUsers();
+        log(req, `install (manual) ${req.user.name}: pack ${version}`);
+        sendJson(res, 201, { ok: true });
+      });
+    }
+    if (p === '/api/server-status' && req.method === 'GET') return sendJson(res, 200, mcStatus);
+    if (p === '/api/releases/changelog' && req.method === 'GET') return sendJson(res, 200, { changelog: changelog() });
     if (p === '/api/users' && req.method === 'GET') {
       if (!isAdmin(req)) return sendJson(res, 403, { error: 'Only an admin can list accounts' });
       return sendJson(res, 200, { users: users.map(publicUser), current: (currentRelease() || {}).version || null });
@@ -1785,5 +1904,6 @@ if (CLI) {
   console.log(`  Models:              ${MODELS_FILE} (${models.length} models)`);
   if (AUTH) console.log(`  Accounts:            ${USERS_FILE} (${users.length} accounts${INVITE_CODE ? ', invite code set' : ', OPEN REGISTRATION, set INVITE_CODE'})`);
   if (MODE === 'hosted' && !ADMIN_TOKEN) console.log('  WARNING: ADMIN_TOKEN is not set, the deploy command cannot talk to this site.');
+  if (MC_SERVER) { console.log(`  Minecraft server:    ${MC_SERVER} (pinged every 30 s for the online list)`); refreshMcStatus(); setInterval(refreshMcStatus, 30000); }
   console.log('  Close this window to stop the server.\n');
 });

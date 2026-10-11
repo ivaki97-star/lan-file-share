@@ -222,6 +222,19 @@
   .mine.none { color: var(--muted); }
   .users { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   .srv { font-size: 12px; color: var(--muted); }
+  .mc { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: -12px 0 16px; }
+  .mc .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; }
+  .mc.on .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .mc .names span { color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; margin-right: 4px; }
+  .cl-row { padding: 12px 14px; border-top: 1px solid var(--border); display: grid; gap: 6px; }
+  .cl-row:first-child { border-top: 0; }
+  .cl-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .cl-head b { font-size: 16px; }
+  .cl-note { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cl-diff { display: grid; gap: 2px; font-size: 13px; }
+  .cl-diff .add { color: var(--ok); }
+  .cl-diff .rm { color: var(--bad); }
+  .cl-diff .chg { color: #f0b54a; }
   .modal-bg { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .6); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
   .modal { background: var(--bg); border: 1px solid var(--border); border-radius: 14px; width: 100%; max-width: 760px; padding: 18px; display: grid; gap: 14px; }
   .modal-head { display: flex; justify-content: space-between; align-items: center; }
@@ -331,6 +344,17 @@
   </div>
 </div>
 
+<div class="modal-bg" id="changelog-modal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>📜 Changelog</h2>
+      <button class="ghost" id="changelog-close" type="button">Close</button>
+    </div>
+    <p class="model-help">Every installer version, newest first, with the mods that changed compared to the version before it (read from each version's pack.json).</p>
+    <div class="files" id="changelog-list"></div>
+  </div>
+</div>
+
 <div class="modal-bg" id="installer-modal" hidden>
   <div class="modal">
     <div class="modal-head">
@@ -372,6 +396,8 @@
     <div class="who" id="who"></div>
     <div class="free" id="free"></div>
   </header>
+
+  <div class="mc" id="mc" hidden></div>
 
   <div class="layout">
   <aside class="chat">
@@ -602,7 +628,7 @@ async function openUsers() {
     let instText = 'nothing reported yet', instClass = 'none';
     if (inst) {
       const cur = data.current && inst.packVersion === data.current;
-      instText = `${vLabel(inst.packVersion || '?')} ${inst.ok ? '' : '(with problems) '}· ${fmtDate(inst.time)}` + (cur ? ' · current' : data.current ? ' · OUTDATED' : '');
+      instText = `${vLabel(inst.packVersion || '?')} ${inst.manual ? '(marked by hand) ' : inst.ok ? '' : '(with problems) '}· ${fmtDate(inst.time)}` + (cur ? ' · current' : data.current ? ' · OUTDATED' : '');
       instClass = cur ? 'ok' : 'old';
     }
     const actions = el('div', { className: 'actions' },
@@ -1755,7 +1781,16 @@ function renderBanner() {
   if (stable && stable !== main) {
     actions.append(el('a', { className: 'btn secondary', href: stable.download, download: stable.downloadName, textContent: `Stable ${vLabel(stable.version)}` }));
   }
+  actions.append(el('a', { className: 'all', textContent: 'Changelog', onclick: openChangelog }));
   actions.append(el('a', { className: 'all', textContent: `All versions (${ready.length})`, onclick: () => { showTab('files'); openFolder(['Mods Installer']); } }));
+  if (me.user && !(me.user.install && me.user.install.packVersion === main.version)) {
+    actions.append(el('a', { className: 'all', textContent: `I installed ${vLabel(main.version)} myself`, title: 'Mark it without running the installer, e.g. after installing by hand', onclick: async () => {
+      const r = await fetch('/api/installs/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ packVersion: main.version }) });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).error || 'Failed');
+      const m = await rawFetch('/api/me', { cache: 'no-store' }).then(x => x.json()).catch(() => null);
+      if (m) { me = m; renderWho(); lastReleasesJson = ''; refreshReleases(); }
+    } }));
+  }
 }
 
 function renderReleaseList() {
@@ -1905,6 +1940,56 @@ $('release-form').addEventListener('submit', async (e) => {
   lastReleasesJson = '';
   refreshReleases();
 });
+
+// ---------- changelog ----------
+async function openChangelog() {
+  $('changelog-modal').hidden = false;
+  const box = $('changelog-list');
+  box.replaceChildren(el('div', { className: 'empty', textContent: 'Loading...' }));
+  const res = await fetch('/api/releases/changelog', { cache: 'no-store' });
+  const data = await res.json().catch(() => ({}));
+  box.replaceChildren();
+  if (!res.ok || !data.changelog || !data.changelog.length) { box.append(el('div', { className: 'empty', textContent: 'No versions yet.' })); return; }
+  for (const v of data.changelog) {
+    const row = el('div', { className: 'cl-row' },
+      el('div', { className: 'cl-head' }, el('b', { textContent: vLabel(v.version) }), ...tagEls(v.tags),
+        el('span', { className: 'file-meta', textContent: `${fmtDate(v.added)}${v.by ? ' · by ' + v.by : ''}${v.minecraft ? ' · Minecraft ' + v.minecraft : ''}${v.mods ? ' · ' + v.mods.length + ' mods' : ''}` })));
+    if (v.note) row.append(el('div', { className: 'cl-note', textContent: v.note }));
+    if (v.diff) {
+      const d = el('div', { className: 'cl-diff' });
+      for (const n of v.diff.added) d.append(el('div', { className: 'add', textContent: '+ ' + n }));
+      for (const n of v.diff.removed) d.append(el('div', { className: 'rm', textContent: '− ' + n }));
+      for (const n of v.diff.changed) d.append(el('div', { className: 'chg', textContent: '↻ ' + n }));
+      if (!d.children.length) d.append(el('div', { className: 'file-meta', textContent: 'same mods as the version before' }));
+      row.append(d);
+    } else if (v.mods) row.append(el('div', { className: 'file-meta', textContent: 'first version: ' + v.mods.join(', ') }));
+    else row.append(el('div', { className: 'file-meta', textContent: 'no pack.json in this version' }));
+    box.append(row);
+  }
+}
+$('changelog-close').onclick = () => { $('changelog-modal').hidden = true; };
+$('changelog-modal').addEventListener('click', (e) => { if (e.target === $('changelog-modal')) $('changelog-modal').hidden = true; });
+if (location.hash === '#changelog') openChangelog();
+
+// ---------- who is on the Minecraft server ----------
+async function refreshMc() {
+  let s;
+  try { s = await (await rawFetch('/api/server-status', { cache: 'no-store' })).json(); } catch { return; }
+  const box = $('mc');
+  if (!s.enabled) { box.hidden = true; return; }
+  box.hidden = false;
+  box.className = 'mc' + (s.online ? ' on' : '');
+  box.replaceChildren(el('span', { className: 'dot' }));
+  if (!s.online) { box.append(`Minecraft server ${s.address} is offline` + (s.checked ? ` (checked ${fmtDate(s.checked)})` : '')); return; }
+  box.append(el('span', {}, `Minecraft server online · ${s.players}/${s.max} playing`, s.version ? ` · ${s.version}` : ''));
+  if (s.names.length) {
+    const names = el('span', { className: 'names' });
+    for (const n of s.names) names.append(el('span', { textContent: n }));
+    box.append(names);
+  } else if (s.players) box.append(el('span', { className: 'file-meta', textContent: '(names hidden by the server)' }));
+}
+refreshMc();
+setInterval(refreshMc, 30000);
 
 // Keep the chat panel below the pinned banner (the banner's height changes with its text).
 new ResizeObserver(() => document.documentElement.style.setProperty('--banner-h', $('banner').offsetHeight + 'px')).observe($('banner'));
