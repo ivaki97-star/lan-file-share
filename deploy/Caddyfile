@@ -1,0 +1,14 @@
+# Caddy in front of LAN File Share: HTTPS with an automatic certificate, uploads passed through unbuffered.
+# Replace the host name and keep PORT in .env in sync with the proxy target. nginx users: see DEPLOYMENT.md, phase 5.
+share.example.com {
+    reverse_proxy 127.0.0.1:8087 {
+        flush_interval -1
+        transport http {
+            read_timeout 1h
+            write_timeout 1h
+        }
+    }
+    request_body {
+        max_size 0
+    }
+}

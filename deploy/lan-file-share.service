@@ -1,0 +1,24 @@
+# systemd unit for LAN File Share. Copy to /etc/systemd/system/, adjust User, WorkingDirectory and the node path.
+# Settings (port, data dir, mode) come from .env in WorkingDirectory, see .env.example.
+[Unit]
+Description=LAN File Share
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lanshare
+Group=lanshare
+WorkingDirectory=/opt/lan-file-share
+ExecStart=/usr/bin/node /opt/lan-file-share/server.js
+Restart=on-failure
+RestartSec=5
+# Uploads are streamed to the data directory; nothing else on the box needs to be writable.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lan-file-share
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
